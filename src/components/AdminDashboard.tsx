@@ -172,7 +172,17 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
         fetchAdminData();
       };
 
-      const adminInterval = setInterval(fetchAdminData, 3000);
+      // Polling fallback: if SSE dropped, still push to Google Sheet whenever the queue changed
+      let lastPolledSignature = '';
+      const adminInterval = setInterval(async () => {
+        const freshItems = await fetchAdminData();
+        if (!freshItems) return;
+        const signature = JSON.stringify(freshItems.map((i) => [i.id, i.status, i.callCount, i.assignedSlot, i.name, i.school]));
+        if (lastPolledSignature && signature !== lastPolledSignature) {
+          await pushToGoogleSheet(freshItems);
+        }
+        lastPolledSignature = signature;
+      }, 3000);
 
       // Bidirectional Sync: Periodically check if Google Sheet was edited (every 3.5s)
       const sheetPullInterval = setInterval(async () => {
