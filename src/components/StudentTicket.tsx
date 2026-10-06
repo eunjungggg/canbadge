@@ -46,15 +46,8 @@ export const StudentTicket: React.FC<Props> = ({ token, onBackToRegister }) => {
         ) {
           navigator.vibrate([300, 150, 300, 150, 300]);
         }
-      } else {
-        // Direct local storage fallback
-        const local = localStorage.getItem(`canbadge_ticket_${token}`);
-        if (local) {
-          setTicket(JSON.parse(local));
-          setLastRefreshed(new Date());
-        } else if (res.status === 404) {
-          throw new Error('대기 정보를 찾을 수 없습니다.');
-        }
+      } else if (res.status === 404) {
+        throw new Error('대기 정보를 찾을 수 없습니다.');
       }
     } catch (err: any) {
       setError(err.message || '데이터 로드 실패');
@@ -318,28 +311,28 @@ export const StudentTicket: React.FC<Props> = ({ token, onBackToRegister }) => {
   };
 
   return (
-    <div className="min-h-screen bg-[#faf8f5] flex flex-col items-center justify-start p-4 sm:p-6 pb-24 text-stone-800">
-      <div className="w-full max-w-md space-y-4">
+    <div className="min-h-[100dvh] bg-[#faf8f5] text-stone-800 px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-nav">
+      <div className="w-full max-w-md mx-auto space-y-4">
         {/* Navigation Bar */}
-        <div className="flex items-center justify-between py-1">
+        <div className="flex items-center justify-between gap-2 pt-1">
           <button
             onClick={onBackToRegister}
-            className="flex items-center gap-1 text-xs font-semibold text-stone-600 hover:text-stone-900 bg-white px-3 py-1.5 rounded-full border border-stone-200 shadow-2xs transition"
+            className="h-10 flex items-center gap-1 text-sm font-semibold text-stone-600 hover:text-stone-900 bg-white px-3.5 rounded-full border border-stone-200 shadow-2xs transition"
           >
-            <ArrowLeft className="w-3.5 h-3.5" />
+            <ArrowLeft className="w-4 h-4" />
             신규 접수
           </button>
           <div className="flex items-center gap-2">
-            <span className="flex items-center gap-1 text-[11px] font-semibold text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-200">
+            <span className="flex items-center gap-1 text-xs font-semibold text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-200">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              실시간 동기화
+              실시간
             </span>
             <button
               onClick={fetchTicket}
-              className="p-1.5 bg-white text-stone-500 hover:text-rose-500 rounded-full border border-stone-200 shadow-2xs transition"
-              title="새로고침"
+              className="w-10 h-10 flex items-center justify-center bg-white text-stone-500 hover:text-rose-500 rounded-full border border-stone-200 shadow-2xs transition"
+              aria-label="새로고침"
             >
-              <RefreshCw className="w-3.5 h-3.5" />
+              <RefreshCw className="w-4 h-4" />
             </button>
           </div>
         </div>
@@ -348,18 +341,18 @@ export const StudentTicket: React.FC<Props> = ({ token, onBackToRegister }) => {
         {renderGuidanceBanner()}
 
         {/* Pastel Ticket Card */}
-        <div className="bg-white rounded-3xl p-6 shadow-sm border border-stone-100 relative overflow-hidden">
-          <div className="flex items-center justify-between pb-4 border-b border-stone-100">
-            <div>
-              <p className="text-[11px] font-bold text-stone-400">참여자</p>
-              <h2 className="text-base font-extrabold text-stone-800 flex items-center gap-1.5">
+        <div className="bg-white rounded-3xl p-5 shadow-sm border border-stone-100 relative overflow-hidden">
+          <div className="flex items-start justify-between gap-3 pb-4 border-b border-stone-100">
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-stone-400">참여자</p>
+              <h2 className="text-lg font-extrabold text-stone-800 flex flex-wrap items-center gap-1.5">
                 {ticket.name} 학생
-                <span className="text-xs font-semibold text-purple-600 bg-purple-50 px-2 py-0.5 rounded-lg border border-purple-100">
+                <span className="text-xs font-semibold text-purple-600 bg-purple-50 px-2 py-0.5 rounded-lg border border-purple-100 truncate max-w-full">
                   {ticket.school}
                 </span>
               </h2>
             </div>
-            <div>
+            <div className="shrink-0">
               <span
                 className={`inline-block px-2.5 py-1 text-xs font-bold rounded-xl ${
                   ticket.status === 'CALLED'
@@ -403,7 +396,7 @@ export const StudentTicket: React.FC<Props> = ({ token, onBackToRegister }) => {
             <p className="text-xs font-bold text-stone-400 uppercase tracking-widest mb-1">
               내 대기 번호
             </p>
-            <div className="inline-block px-6 py-2 bg-gradient-to-r from-stone-800 to-stone-900 text-white rounded-2xl shadow-inner font-mono text-4xl sm:text-5xl font-black tracking-wider">
+            <div className="inline-block px-7 py-3 bg-gradient-to-r from-stone-800 to-stone-900 text-white rounded-2xl shadow-inner font-mono text-5xl font-black tracking-wider">
               {ticket.ticketNumber}
             </div>
           </div>
@@ -438,12 +431,12 @@ export const StudentTicket: React.FC<Props> = ({ token, onBackToRegister }) => {
         <div className="bg-white rounded-3xl p-4 shadow-sm border border-stone-100">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2">
-              <div className="w-7 h-7 rounded-xl bg-rose-50 text-rose-500 flex items-center justify-center">
-                <Bell className="w-3.5 h-3.5" />
+              <div className="w-9 h-9 rounded-xl bg-rose-50 text-rose-500 flex items-center justify-center">
+                <Bell className="w-4 h-4" />
               </div>
               <div>
-                <h3 className="text-xs font-bold text-stone-800">휴대폰 푸시 알림</h3>
-                <p className="text-[10px] text-stone-400">화면이 꺼져도 복귀 및 기계 이동 알림</p>
+                <h3 className="text-sm font-bold text-stone-800">휴대폰 알림 받기</h3>
+                <p className="text-xs text-stone-400">다른 부스에 있어도 차례가 오면 알려드려요</p>
               </div>
             </div>
             {ticket.hasPushSubscribed && (
@@ -466,7 +459,7 @@ export const StudentTicket: React.FC<Props> = ({ token, onBackToRegister }) => {
               <button
                 onClick={handleSubscribePush}
                 disabled={subscribingPush}
-                className="w-full py-2.5 bg-stone-800 text-white font-bold rounded-2xl text-xs hover:bg-stone-900 active:scale-98 transition flex items-center justify-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
+                className="w-full h-12 bg-stone-800 text-white font-bold rounded-2xl text-sm hover:bg-stone-900 active:scale-[0.98] transition flex items-center justify-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
               >
                 {subscribingPush ? (
                   <>
@@ -484,7 +477,7 @@ export const StudentTicket: React.FC<Props> = ({ token, onBackToRegister }) => {
           )}
 
           {pushStatusMessage && (
-            <div className="mt-2 p-2 bg-rose-50 rounded-xl text-xs text-rose-800 font-medium">
+            <div className="mt-2 p-2.5 bg-rose-50 rounded-xl text-sm text-rose-800 font-medium">
               {pushStatusMessage}
             </div>
           )}
@@ -492,7 +485,7 @@ export const StudentTicket: React.FC<Props> = ({ token, onBackToRegister }) => {
 
         {/* Notice Message */}
         {ticket.noticeMessage && (
-          <div className="p-3 bg-white rounded-2xl border border-stone-100 text-xs text-stone-600 flex items-start gap-2">
+          <div className="p-3 bg-white rounded-2xl border border-stone-100 text-sm text-stone-600 flex items-start gap-2">
             <span className="font-bold text-amber-500 shrink-0">공지</span>
             <span className="leading-relaxed">{ticket.noticeMessage}</span>
           </div>

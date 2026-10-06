@@ -11,7 +11,7 @@ export const IOSGuideModal: React.FC<Props> = ({ isOpen, onClose }) => {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-      <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl transition-all">
+      <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl transition-all max-h-[90dvh] overflow-y-auto">
         <div className="flex items-center justify-between pb-3 border-b border-gray-100">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold">

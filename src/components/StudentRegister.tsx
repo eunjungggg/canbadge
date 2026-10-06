@@ -61,39 +61,7 @@ export const StudentRegister: React.FC<Props> = ({
         localStorage.setItem('canbadge_ticket', res.data.ticketNumber);
         onRegistered(res.data.accessToken);
       } else {
-        // Direct Serverless Fallback
-        const currentCount = parseInt(localStorage.getItem('canbadge_last_seq') || '0', 10) + 1;
-        localStorage.setItem('canbadge_last_seq', currentCount.toString());
-        const ticketNumber = `A-${String(currentCount).padStart(3, '0')}`;
-        const token = 'st-' + Date.now();
-
-        const newStudent = {
-          ticketNumber,
-          accessToken: token,
-          name: name.trim(),
-          school: school.trim(),
-          status: 'WAITING',
-          callCount: 0,
-          assignedSlot: null,
-          registeredAt: new Date().toISOString(),
-          notifiedStages: ['REGISTERED'],
-          waitingAheadCount: 0,
-          currentCallingNumber: '대기 중',
-          noticeMessage: '부스에 오신 것을 환영합니다! 자유롭게 관람 후 순서가 되기 전에 돌아와주세요(●\'◡\'●)',
-          returnGuidance: 'IMMINENT',
-          hasPushSubscribed: false,
-        };
-
-        localStorage.setItem('canbadge_token', token);
-        localStorage.setItem('canbadge_ticket', ticketNumber);
-        localStorage.setItem(`canbadge_ticket_${token}`, JSON.stringify(newStudent));
-
-        const localItemsStr = localStorage.getItem('canbadge_local_items');
-        const localItems = localItemsStr ? JSON.parse(localItemsStr) : [];
-        localItems.push(newStudent);
-        localStorage.setItem('canbadge_local_items', JSON.stringify(localItems));
-
-        onRegistered(token);
+        setErrorMessage(res.error || '접수에 실패했습니다. 잠시 후 다시 시도해 주세요.');
       }
     } catch (err: any) {
       setErrorMessage(err.message || '접수 실패');
@@ -106,188 +74,193 @@ export const StudentRegister: React.FC<Props> = ({
   const isClosed = publicData?.registrationStatus === 'CLOSED';
   const isOpen = publicData?.registrationStatus === 'OPEN' || !publicData;
 
-  return (
-    <div className="min-h-screen bg-[#faf8f5] flex flex-col items-center justify-start p-4 sm:p-6 pb-24 text-stone-800">
-      <div className="w-full max-w-md">
-        {/* Soft Pastel Header */}
-        <div className="text-center pt-6 pb-5">
-          <div className="inline-flex items-center justify-center p-3.5 bg-white/90 backdrop-blur-xs rounded-3xl shadow-sm border border-rose-100 mb-3 relative">
-            <img src="/logo.png" alt="Canbadge Logo" className="w-16 h-16 drop-shadow-xs" />
-            <div className="absolute -top-1 -right-1 bg-amber-200 text-amber-800 rounded-full p-1.5 shadow-2xs">
-              <Sparkles className="w-3.5 h-3.5 fill-amber-400" />
-            </div>
-          </div>
-          <div className="inline-block px-3.5 py-1 bg-purple-50 text-purple-700 text-xs font-bold rounded-full border border-purple-200/80 mb-2 shadow-2xs">
-            인천비즈니스고등학교 콘텐츠디자인과
-          </div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold text-stone-800 tracking-tight">
-            나만의 캔뱃지 만들기
-          </h1>
-          <p className="mt-1 text-xs sm:text-sm text-stone-500 font-medium">
-            실시간 대기 신청 & 순번 알림 서비스
-          </p>
-        </div>
+  const inputClass =
+    'w-full h-14 px-4 bg-[#faf9f7] border border-stone-200 rounded-2xl text-stone-800 text-base placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-rose-300 focus:bg-white transition';
 
-        {/* Existing Ticket Banner */}
-        {existingToken && (
-          <div className="mb-5 p-4 bg-gradient-to-r from-rose-100 via-purple-100 to-sky-100 rounded-3xl border border-rose-200/60 shadow-xs flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-2xl bg-white/80 text-rose-500 flex items-center justify-center shadow-2xs">
-                <Ticket className="w-5 h-5" />
-              </div>
-              <div>
-                <p className="text-[11px] text-stone-500 font-medium">이전에 받은 대기표가 있어요</p>
-                <p className="text-sm font-bold text-stone-800">내 대기 순서 확인하기</p>
-              </div>
+  return (
+    <div className="min-h-[100dvh] bg-[#faf8f5] text-stone-800 px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-nav">
+      <div className="w-full max-w-md mx-auto space-y-4">
+        {/* Header */}
+        <header className="flex items-center gap-3 pt-2">
+          <div className="relative shrink-0 p-2 bg-white rounded-2xl shadow-sm border border-rose-100">
+            <img src="/logo.png" alt="" className="w-11 h-11" />
+            <div className="absolute -top-1 -right-1 bg-amber-200 text-amber-800 rounded-full p-1 shadow-2xs">
+              <Sparkles className="w-3 h-3 fill-amber-400" />
             </div>
-            <button
-              onClick={() => onGoToStatus(existingToken)}
-              className="px-3.5 py-2 bg-white text-rose-600 font-bold text-xs rounded-2xl shadow-xs hover:bg-rose-50 active:scale-95 transition flex items-center gap-1 border border-rose-200"
-            >
-              조회
-              <ArrowRight className="w-3.5 h-3.5" />
-            </button>
           </div>
+          <div className="min-w-0">
+            <p className="text-[11px] font-bold text-purple-700 truncate">
+              인천비즈니스고 콘텐츠디자인과
+            </p>
+            <h1 className="text-xl font-extrabold tracking-tight leading-tight">나만의 캔뱃지 만들기</h1>
+            <p className="text-xs text-stone-500">실시간 대기 신청 · 순번 알림</p>
+          </div>
+        </header>
+
+        {/* Existing ticket */}
+        {existingToken && (
+          <button
+            onClick={() => onGoToStatus(existingToken)}
+            className="w-full p-4 bg-gradient-to-r from-rose-100 via-purple-100 to-sky-100 rounded-3xl border border-rose-200/60 shadow-xs flex items-center gap-3 text-left active:scale-[0.98] transition"
+          >
+            <div className="w-11 h-11 rounded-2xl bg-white/80 text-rose-500 flex items-center justify-center shrink-0">
+              <Ticket className="w-5 h-5" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs text-stone-500">이전에 받은 대기표가 있어요</p>
+              <p className="text-base font-bold text-stone-800">내 대기 순서 확인하기</p>
+            </div>
+            <ArrowRight className="w-5 h-5 text-rose-500 shrink-0" />
+          </button>
         )}
 
-        {/* Live Booth Info Card (Clean & Minimal: Duration removed) */}
-        <div className="bg-white rounded-3xl p-4 shadow-sm border border-stone-100 mb-5">
-          <div className="flex items-center justify-between mb-3 pb-2 border-b border-stone-100">
-            <div className="flex items-center gap-2">
-              <span className="relative flex h-2.5 w-2.5">
-                <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
-                  isOpen ? 'bg-emerald-300' : isPaused ? 'bg-amber-300' : 'bg-rose-300'
-                }`} />
-                <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                  isOpen ? 'bg-emerald-400' : isPaused ? 'bg-amber-400' : 'bg-rose-400'
-                }`} />
-              </span>
-              <span className="text-xs font-bold text-stone-700">
-                {isOpen ? '현재 접수 중' : isPaused ? '접수 일시 중지' : '접수 마감'}
-              </span>
+        {/* Live booth status */}
+        <section className="bg-white rounded-3xl p-4 shadow-sm border border-stone-100">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-2xl bg-purple-50 text-purple-600 flex items-center justify-center">
+                <Users className="w-5 h-5" />
+              </div>
+              <div>
+                <p className="text-xs text-stone-500">지금 기다리는 사람</p>
+                <p className="text-2xl font-black text-purple-900 leading-tight">
+                  {publicData ? `${publicData.totalWaitingCount}명` : '-'}
+                </p>
+              </div>
             </div>
-            <button
-              onClick={onRefreshPublic}
-              className="p-1 text-stone-400 hover:text-stone-600 rounded-lg transition"
-              title="새로고침"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-            </button>
-          </div>
-
-          <div className="p-4 bg-purple-50/50 rounded-2xl border border-purple-100 text-center">
-            <p className="text-xs text-purple-600 font-medium flex items-center justify-center gap-1">
-              <Users className="w-3.5 h-3.5" /> 현재 대기 중인 인원
-            </p>
-            <p className="text-2xl font-black text-purple-900 mt-1">
-              {publicData ? `${publicData.totalWaitingCount}명` : '-'}
-            </p>
+            <div className="flex items-center gap-2">
+              <span
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold ${
+                  isOpen
+                    ? 'bg-emerald-50 text-emerald-700'
+                    : isPaused
+                    ? 'bg-amber-50 text-amber-700'
+                    : 'bg-rose-50 text-rose-700'
+                }`}
+              >
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    isOpen ? 'bg-emerald-400 animate-pulse' : isPaused ? 'bg-amber-400' : 'bg-rose-400'
+                  }`}
+                />
+                {isOpen ? '접수 중' : isPaused ? '일시 중지' : '마감'}
+              </span>
+              <button
+                onClick={onRefreshPublic}
+                className="w-9 h-9 flex items-center justify-center text-stone-400 hover:text-stone-600 rounded-full hover:bg-stone-50 transition"
+                aria-label="새로고침"
+              >
+                <RefreshCw className="w-4 h-4" />
+              </button>
+            </div>
           </div>
 
           {publicData?.noticeMessage && (
-            <p className="mt-3 text-xs text-stone-600 bg-stone-50 p-3 rounded-2xl border border-stone-100 flex items-start gap-2">
-              <span className="text-amber-500 font-bold shrink-0">📢</span>
-              <span>{publicData.noticeMessage}</span>
+            <p className="mt-3 text-sm text-stone-600 bg-stone-50 p-3 rounded-2xl leading-relaxed">
+              📢 {publicData.noticeMessage}
             </p>
           )}
-        </div>
+        </section>
 
-        {/* Registration Form */}
-        <div className="bg-white rounded-3xl p-6 shadow-md border border-rose-50">
-          <h2 className="text-base sm:text-lg font-bold text-stone-800 mb-1">체험 대기 등록</h2>
-          <p className="text-xs text-stone-500 mb-5">
-            등록 후 대기표를 확인하시고, 차례가 오면 사진 접수대로 와 주세요.
-          </p>
-
-          {errorMessage && (
-            <div className="mb-4 p-3 bg-rose-50 border border-rose-200 rounded-2xl text-xs text-rose-700 flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0 text-rose-500" />
-              <span>{errorMessage}</span>
-            </div>
-          )}
-
+        {/* Registration form */}
+        <section className="bg-white rounded-3xl p-5 shadow-md border border-rose-50">
           {isClosed ? (
             <div className="text-center py-8">
-              <div className="w-12 h-12 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center mx-auto mb-3">
-                <AlertCircle className="w-6 h-6" />
+              <div className="w-14 h-14 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center mx-auto mb-3">
+                <AlertCircle className="w-7 h-7" />
               </div>
-              <h3 className="text-sm font-bold text-stone-800">금일 접수가 마감되었습니다</h3>
-              <p className="text-xs text-stone-500 mt-1">
-                많은 성원에 감사드립니다. 이미 번호표를 받으신 분은 대기 현황을 확인해 주세요.
+              <h2 className="text-lg font-bold">오늘 접수가 마감되었어요</h2>
+              <p className="text-sm text-stone-500 mt-1">
+                이미 번호표를 받았다면 위에서 대기 순서를 확인해 주세요.
               </p>
             </div>
           ) : isPaused ? (
             <div className="text-center py-8">
-              <div className="w-12 h-12 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center mx-auto mb-3">
-                <AlertCircle className="w-6 h-6" />
+              <div className="w-14 h-14 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center mx-auto mb-3">
+                <AlertCircle className="w-7 h-7" />
               </div>
-              <h3 className="text-sm font-bold text-stone-800">잠시 대기 접수가 중지되었습니다</h3>
-              <p className="text-xs text-stone-500 mt-1">
-                체험 혼잡도 조절 중입니다. 운영진이 곧 접수를 재개합니다.
-              </p>
+              <h2 className="text-lg font-bold">잠시 접수가 중지되었어요</h2>
+              <p className="text-sm text-stone-500 mt-1">혼잡도 조절 중입니다. 곧 다시 열려요!</p>
             </div>
           ) : (
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>
-                <label className="block text-xs font-bold text-stone-700 mb-1.5 flex items-center gap-1">
-                  <User className="w-3.5 h-3.5 text-rose-400" />
-                  학생 이름 <span className="text-rose-400">*</span>
+                <h2 className="text-lg font-bold">체험 대기 등록</h2>
+                <p className="text-sm text-stone-500">등록하면 바로 번호표가 나와요.</p>
+              </div>
+
+              {errorMessage && (
+                <div
+                  role="alert"
+                  className="p-3 bg-rose-50 border border-rose-200 rounded-2xl text-sm text-rose-700 flex items-center gap-2"
+                >
+                  <AlertCircle className="w-4 h-4 shrink-0 text-rose-500" />
+                  <span>{errorMessage}</span>
+                </div>
+              )}
+
+              <div>
+                <label htmlFor="reg-name" className="text-sm font-bold text-stone-700 mb-1.5 flex items-center gap-1">
+                  <User className="w-4 h-4 text-rose-400" />
+                  이름
                 </label>
                 <input
+                  id="reg-name"
                   type="text"
                   required
+                  autoComplete="name"
+                  enterKeyHint="next"
                   placeholder="예: 홍길동"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   maxLength={20}
-                  className="w-full px-4 py-3 bg-[#faf9f7] border border-stone-200 rounded-2xl text-stone-800 text-sm focus:outline-none focus:ring-2 focus:ring-rose-300 focus:bg-white transition"
+                  className={inputClass}
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-stone-700 mb-1.5 flex items-center gap-1">
-                  <School className="w-3.5 h-3.5 text-rose-400" />
-                  소속 학교명 <span className="text-rose-400">*</span>
+                <label htmlFor="reg-school" className="text-sm font-bold text-stone-700 mb-1.5 flex items-center gap-1">
+                  <School className="w-4 h-4 text-rose-400" />
+                  학교
                 </label>
                 <input
+                  id="reg-school"
                   type="text"
                   required
+                  autoComplete="organization"
+                  enterKeyHint="done"
                   placeholder="예: OO중"
                   value={school}
                   onChange={(e) => setSchool(e.target.value)}
                   maxLength={30}
-                  className="w-full px-4 py-3 bg-[#faf9f7] border border-stone-200 rounded-2xl text-stone-800 text-sm focus:outline-none focus:ring-2 focus:ring-rose-300 focus:bg-white transition"
+                  className={inputClass}
                 />
               </div>
 
-              <div className="pt-2">
-                <button
-                  type="submit"
-                  disabled={isSubmitting}
-                  className="w-full py-4 bg-gradient-to-r from-rose-400 via-purple-400 to-sky-400 text-white font-bold rounded-2xl shadow-md hover:opacity-95 active:scale-98 transition flex items-center justify-center gap-2 text-sm cursor-pointer disabled:opacity-50"
-                >
-                  {isSubmitting ? (
-                    <>
-                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      대기표 발급 중...
-                    </>
-                  ) : (
-                    <>
-                      대기 등록하고 순번 받기
-                      <ArrowRight className="w-4 h-4" />
-                    </>
-                  )}
-                </button>
-              </div>
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                className="w-full h-14 bg-gradient-to-r from-rose-400 via-purple-400 to-sky-400 text-white text-base font-bold rounded-2xl shadow-md active:scale-[0.98] transition flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {isSubmitting ? (
+                  <>
+                    <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    번호표 받는 중...
+                  </>
+                ) : (
+                  <>
+                    대기 등록하고 번호 받기
+                    <ArrowRight className="w-5 h-5" />
+                  </>
+                )}
+              </button>
 
-              <div className="pt-2 text-center">
-                <p className="text-[11px] text-stone-400">
-                  🔒 입력하신 이름과 학교명은 관리자 호출 용도로만 사용되며, 전광판에는 번호만 노출됩니다.
-                </p>
-              </div>
+              <p className="text-xs text-stone-400 text-center leading-relaxed">
+                🔒 이름과 학교는 호출에만 쓰이고, 전광판에는 번호만 나와요.
+              </p>
             </form>
           )}
-        </div>
+        </section>
       </div>
     </div>
   );

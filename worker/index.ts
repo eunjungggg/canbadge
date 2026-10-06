@@ -128,6 +128,122 @@ export class BoothState {
     const data = JSON.stringify({ type: 'UPDATE', timestamp: Date.now() });
     for (const writer of this.sseClients) this.send(writer, `data: ${data}\n\n`);
     this.scheduleSheetWrite();
+    this.evaluatePushAlerts().catch((e) => console.warn('Push alerts error:', e?.message));
+  }
+
+  // ---------------- Web Push ----------------
+  private appOrigin = '';
+  private vapid: { publicKey: string; privateJwk: JsonWebKey } | null = null;
+
+  private async getVapidKeys() {
+    if (this.vapid) return this.vapid;
+    const stored = await this.ctx.storage.get('vapid');
+    if (stored?.publicKey && stored?.privateJwk) {
+      this.vapid = stored;
+      return stored as { publicKey: string; privateJwk: JsonWebKey };
+    }
+    const pair: any = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const publicRaw = await crypto.subtle.exportKey('raw', pair.publicKey);
+    const privateJwk = (await crypto.subtle.exportKey('jwk', pair.privateKey)) as JsonWebKey;
+    const created = { publicKey: b64uEncode(publicRaw), privateJwk };
+    await this.ctx.storage.put('vapid', created);
+    this.vapid = created;
+    return created;
+  }
+
+  private async sendPush(item: QueueItem, payload: { title: string; body: string; tag?: string }): Promise<boolean> {
+    const sub = item.pushSubscription;
+    if (!sub) return false;
+    try {
+      const vapid = await this.getVapidKeys();
+      const message = JSON.stringify({
+        title: payload.title,
+        body: payload.body,
+        url: `/?token=${item.accessToken}`,
+        tag: payload.tag || 'badge-queue-alert',
+        ticketNumber: item.ticketNumber,
+      });
+      const status = await sendWebPush(sub, message, vapid, this.appOrigin || 'https://canbadge.workers.dev');
+      if (status === 404 || status === 410) {
+        item.pushSubscription = null;
+        await this.save();
+        return false;
+      }
+      if (status < 200 || status >= 300) {
+        console.warn(`Push failed for ${item.ticketNumber}: HTTP ${status}`);
+        return false;
+      }
+      return true;
+    } catch (e: any) {
+      console.warn(`Push error for ${item.ticketNumber}:`, e?.message);
+      return false;
+    }
+  }
+
+  // Decide which stage alerts are due. Stages are marked synchronously before sending,
+  // so overlapping evaluations never send the same alert twice.
+  private async evaluatePushAlerts() {
+    const due: { item: QueueItem; title: string; body: string; tag: string }[] = [];
+    const mark = (item: QueueItem, stage: string) => {
+      if (!item.notifiedStages) item.notifiedStages = [];
+      if (item.notifiedStages.includes(stage)) return false;
+      item.notifiedStages.push(stage);
+      return true;
+    };
+
+    this.queueItems
+      .filter(isWaiting)
+      .sort(sortWaiting)
+      .forEach((item, ahead) => {
+        if (ahead <= this.config.imminentNotifyCount) {
+          if (mark(item, 'IMMINENT_2')) {
+            due.push({
+              item,
+              title: `[호출 임박] 곧 내 차례예요! (${item.ticketNumber})`,
+              body: `앞에 ${ahead}명 남았습니다. 사진 접수대 앞으로 와 주세요.`,
+              tag: `stage-imminent-${item.ticketNumber}`,
+            });
+          }
+        } else if (ahead <= this.config.returnNotifyCount && mark(item, 'RETURN_5')) {
+          due.push({
+            item,
+            title: `[복귀 안내] 차례가 가까워졌어요 (${item.ticketNumber})`,
+            body: `앞에 ${ahead}명 남았습니다. 캔뱃지 부스 근처로 돌아와 주세요.`,
+            tag: `stage-return-${item.ticketNumber}`,
+          });
+        }
+      });
+
+    for (const item of this.queueItems) {
+      if (item.status === 'CALLED' && mark(item, `CALLED_${item.callCount}`)) {
+        due.push({
+          item,
+          title: `★ 지금 입장해 주세요! (${item.ticketNumber})`,
+          body: `${item.ticketNumber}번 학생, 사진 접수대로 와 주세요. (${item.callCount}차 호출)`,
+          tag: `stage-called-${item.ticketNumber}`,
+        });
+      } else if (item.status === 'ASSIGNED_PRESS_1' && mark(item, 'PRESS_1')) {
+        due.push({
+          item,
+          title: `[이동 안내] 1번 프레스 기계로 가세요! (${item.ticketNumber})`,
+          body: '사진 출력이 끝났어요. 1번 프레스 기계에서 캔뱃지를 만들어요!',
+          tag: `stage-press1-${item.ticketNumber}`,
+        });
+      } else if (item.status === 'ASSIGNED_PRESS_2' && mark(item, 'PRESS_2')) {
+        due.push({
+          item,
+          title: `[이동 안내] 2번 프레스 기계로 가세요! (${item.ticketNumber})`,
+          body: '사진 출력이 끝났어요. 2번 프레스 기계에서 캔뱃지를 만들어요!',
+          tag: `stage-press2-${item.ticketNumber}`,
+        });
+      }
+    }
+
+    if (due.length === 0) return;
+    await this.save();
+    await Promise.all(
+      due.filter((d) => d.item.pushSubscription).map((d) => this.sendPush(d.item, d))
+    );
   }
 
   // ---------------- Server-side Google Sheet write (Apps Script webhook) ----------------
@@ -359,6 +475,7 @@ export class BoothState {
     const path = url.pathname;
     const method = request.method;
     const body: any = method === 'POST' ? await request.json().catch(() => ({})) : {};
+    this.appOrigin = url.origin;
 
     // Public endpoints
     if (path === '/api/health') {
@@ -377,12 +494,30 @@ export class BoothState {
 
     if (path === '/api/queue/register' && method === 'POST') return this.register(body);
 
-    // Web Push is not available on the Workers runtime (web-push needs Node crypto)
     if (path === '/api/vapid-public-key') {
-      return json({ error: '이 서버에서는 푸시 알림이 지원되지 않습니다.' }, 503);
+      const vapid = await this.getVapidKeys();
+      return json({ publicKey: vapid.publicKey });
     }
-    if (path === '/api/queue/push-subscribe') {
-      return json({ error: '이 서버에서는 푸시 알림이 지원되지 않습니다.' }, 503);
+    if (path === '/api/queue/push-subscribe' && method === 'POST') {
+      const { token, subscription } = body;
+      if (!token || !subscription?.endpoint || !subscription?.keys?.p256dh || !subscription?.keys?.auth) {
+        return json({ error: '유효한 토큰과 푸시 구독 정보가 필요합니다.' }, 400);
+      }
+      const item = this.queueItems.find((i) => i.accessToken === token);
+      if (!item) return json({ error: '대기 정보를 찾을 수 없습니다.' }, 404);
+
+      item.pushSubscription = subscription;
+      await this.save();
+      const sent = await this.sendPush(item, {
+        title: `[접수 완료] ${item.ticketNumber}번 대기표 등록`,
+        body: `${item.name}님, 순서가 가까워지면 이 알림으로 알려드릴게요!`,
+        tag: `welcome-${item.ticketNumber}`,
+      });
+      if (!sent) {
+        return json({ error: '알림 등록은 되었지만 테스트 알림 발송에 실패했습니다. 잠시 후 다시 시도해 주세요.' }, 502);
+      }
+      await this.broadcastUpdate();
+      return json({ success: true, message: '푸시 알림 등록 완료' });
     }
 
     if (path === '/api/admin/login' && method === 'POST') {
@@ -758,6 +893,104 @@ export class BoothState {
       return json({ error: err?.message || '시트 동기화 실패' }, 500);
     }
   }
+}
+
+// ----------------------------------------------------
+// Web Push helpers (VAPID RFC 8292 + aes128gcm RFC 8291) on WebCrypto
+// ----------------------------------------------------
+const utf8 = (s: string) => new TextEncoder().encode(s);
+
+function b64uEncode(buf: ArrayBuffer | Uint8Array): string {
+  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function b64uDecode(s: string): Uint8Array {
+  const b64 = s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (s.length % 4)) % 4);
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let offset = 0;
+  for (const p of parts) {
+    out.set(p, offset);
+    offset += p.length;
+  }
+  return out;
+}
+
+async function hkdf(salt: Uint8Array, ikm: Uint8Array, info: Uint8Array, length: number): Promise<Uint8Array> {
+  const key = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info }, key, length * 8);
+  return new Uint8Array(bits);
+}
+
+async function sendWebPush(
+  sub: { endpoint: string; keys: { p256dh: string; auth: string } },
+  payload: string,
+  vapid: { publicKey: string; privateJwk: JsonWebKey },
+  subject: string
+): Promise<number> {
+  // 1. VAPID JWT (ES256)
+  const header = b64uEncode(utf8(JSON.stringify({ typ: 'JWT', alg: 'ES256' })));
+  const claims = b64uEncode(
+    utf8(
+      JSON.stringify({
+        aud: new URL(sub.endpoint).origin,
+        exp: Math.floor(Date.now() / 1000) + 12 * 3600,
+        sub: subject,
+      })
+    )
+  );
+  const unsigned = `${header}.${claims}`;
+  const signKey = await crypto.subtle.importKey('jwk', vapid.privateJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  const signature = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, signKey, utf8(unsigned));
+  const jwt = `${unsigned}.${b64uEncode(signature)}`;
+
+  // 2. Payload encryption (aes128gcm)
+  const uaPublic = b64uDecode(sub.keys.p256dh);
+  const authSecret = b64uDecode(sub.keys.auth);
+  const local: any = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const asPublic = new Uint8Array(await crypto.subtle.exportKey('raw', local.publicKey) as ArrayBuffer);
+  const uaKey = await crypto.subtle.importKey('raw', uaPublic, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const shared = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: uaKey } as any, local.privateKey, 256));
+
+  const ikm = await hkdf(authSecret, shared, concatBytes(utf8('WebPush: info\0'), uaPublic, asPublic), 32);
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const cek = await hkdf(salt, ikm, utf8('Content-Encoding: aes128gcm\0'), 16);
+  const nonce = await hkdf(salt, ikm, utf8('Content-Encoding: nonce\0'), 12);
+
+  const aesKey = await crypto.subtle.importKey('raw', cek, 'AES-GCM', false, ['encrypt']);
+  const cipher = new Uint8Array(
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, aesKey, concatBytes(utf8(payload), new Uint8Array([2])))
+  );
+
+  const recordHeader = new Uint8Array(16 + 4 + 1 + asPublic.length);
+  recordHeader.set(salt, 0);
+  new DataView(recordHeader.buffer).setUint32(16, 4096);
+  recordHeader[20] = asPublic.length;
+  recordHeader.set(asPublic, 21);
+
+  const res = await fetch(sub.endpoint, {
+    method: 'POST',
+    headers: {
+      Authorization: `vapid t=${jwt}, k=${vapid.publicKey}`,
+      'Content-Encoding': 'aes128gcm',
+      'Content-Type': 'application/octet-stream',
+      TTL: '3600',
+      Urgency: 'high',
+    },
+    body: concatBytes(recordHeader, cipher),
+  });
+  if (res.status >= 400) console.warn('Push service response:', res.status, (await res.text()).slice(0, 200));
+  else await res.body?.cancel();
+  return res.status;
 }
 
 function parseStatus(raw: string): QueueStatus {

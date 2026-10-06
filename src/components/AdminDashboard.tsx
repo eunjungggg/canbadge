@@ -745,26 +745,26 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
   // MAIN ADMIN DASHBOARD
   // -------------------------------------------------------------------------
   return (
-    <div className="min-h-screen bg-[#faf8f5] text-stone-800 flex flex-col pb-24">
+    <div className="min-h-[100dvh] bg-[#faf8f5] text-stone-800 flex flex-col pb-nav">
       {/* Top Header */}
-      <header className="bg-white/90 backdrop-blur-xs border-b border-stone-200/80 px-4 sm:px-8 py-3.5 sticky top-0 z-30 shadow-2xs">
-        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-rose-300 via-purple-300 to-sky-300 flex items-center justify-center text-white shadow-2xs">
+      <header className="bg-white/90 backdrop-blur-xs border-b border-stone-200/80 px-4 lg:px-8 py-3 sticky top-0 z-30 shadow-2xs">
+        <div className="max-w-[1600px] mx-auto flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 shrink-0 rounded-2xl bg-gradient-to-tr from-rose-300 via-purple-300 to-sky-300 flex items-center justify-center text-white shadow-2xs">
               <Sparkles className="w-5 h-5 text-white" />
             </div>
-            <div className="flex items-center gap-2.5">
-              <h1 className="text-base font-extrabold text-stone-800">
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 min-w-0">
+              <h1 className="text-base lg:text-lg font-extrabold text-stone-800 truncate">
                 {config?.boothTitle || '캔뱃지 부스 관리 시스템'}
               </h1>
-              <span className="text-[11px] px-2.5 py-0.5 rounded-full font-bold bg-purple-50 text-purple-700 border border-purple-200">
+              <span className="text-[11px] px-2.5 py-0.5 rounded-full font-bold bg-purple-50 text-purple-700 border border-purple-200 whitespace-nowrap">
                 관리자 모드
               </span>
             </div>
           </div>
 
           {/* Quick Registration Status Toggle & Google Sheet Button */}
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <div className="flex items-center bg-[#f4f2ee] p-1 rounded-2xl border border-stone-200/80 text-xs font-bold">
               <button
                 onClick={() => handleStatusChange('OPEN')}
@@ -807,7 +807,7 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
               }`}
             >
               <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-              <span>{syncedSheetUrl ? '구글 시트 DB 연결됨' : '구글 시트 연동'}</span>
+              <span className="hidden md:inline">{syncedSheetUrl ? '구글 시트 DB 연결됨' : '구글 시트 연동'}</span>
             </button>
 
             <button
@@ -824,7 +824,7 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
               title="모든 대기 데이터를 초기화하고 1번으로 리셋"
             >
               <RotateCcw className="w-3.5 h-3.5" />
-              <span>데이터 초기화</span>
+              <span className="hidden md:inline">데이터 초기화</span>
             </button>
 
             <button
@@ -847,7 +847,7 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
       </header>
 
       {/* Main Container */}
-      <main className="max-w-7xl mx-auto w-full px-4 sm:px-8 py-5 space-y-5">
+      <main className="max-w-[1600px] mx-auto w-full px-4 lg:px-8 py-5 space-y-5">
         {/* GOOGLE SHEETS LIVE DB STATUS BANNER */}
         {syncedSheetUrl && (
           <div
@@ -929,10 +929,39 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
           </div>
         )}
 
+        {/* METRICS ROW */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 text-center">
+          <div className="bg-white p-3.5 rounded-2xl border border-stone-200">
+            <span className="text-xs font-bold text-stone-400">전체 접수</span>
+            <p className="text-2xl font-black text-stone-800 mt-0.5">{stats?.totalRegistered || 0}</p>
+          </div>
+          <div className="p-3.5 rounded-2xl border border-purple-200 bg-purple-50/40">
+            <span className="text-xs font-bold text-purple-600">현재 대기</span>
+            <p className="text-2xl font-black text-purple-700 mt-0.5">{stats?.totalWaiting || 0}</p>
+          </div>
+          <div className="p-3.5 rounded-2xl border border-rose-200 bg-rose-50/40">
+            <span className="text-xs font-bold text-rose-600">접수대 호출</span>
+            <p className="text-2xl font-black text-rose-600 mt-0.5">{stats?.totalCalling || 0}</p>
+          </div>
+          <div className="p-3.5 rounded-2xl border border-emerald-200 bg-emerald-50/40">
+            <span className="text-xs font-bold text-emerald-600">완료 인원</span>
+            <p className="text-2xl font-black text-emerald-700 mt-0.5">{stats?.totalCompleted || 0}</p>
+          </div>
+          <div className="bg-white p-3.5 rounded-2xl border border-stone-200">
+            <span className="text-xs font-bold text-stone-500">재대기/부재</span>
+            <p className="text-2xl font-black text-stone-700 mt-0.5">
+              {(stats?.totalReWaiting || 0) + (stats?.totalAbsent || 0)}
+            </p>
+          </div>
+        </div>
+
+        {/* Desktop (xl+): workflow on the left, queue table on the right */}
+        <div className="space-y-5 xl:space-y-0 xl:grid xl:grid-cols-12 xl:gap-5 xl:items-start">
+        <div className="xl:col-span-5">
         {/* WORKFLOW HERO: 1단계 사진 접수/편집/출력대 & 2단계 1번/2번 프레스 안내 */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-12 xl:grid-cols-1 gap-4">
           {/* STEP 1: PHOTO EDITING DESK (5 Cols) */}
-          <div className="lg:col-span-5 bg-white rounded-3xl p-5 shadow-sm border border-purple-100 flex flex-col justify-between">
+          <div className="lg:col-span-5 xl:col-span-1 bg-white rounded-3xl p-5 shadow-sm border border-purple-100 flex flex-col justify-between">
             <div>
               <div className="flex items-center justify-between pb-3 border-b border-stone-100">
                 <div className="flex items-center gap-2">
@@ -1089,7 +1118,7 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
           </div>
 
           {/* STEP 2: PRESS MACHINES 1 & 2 (7 Cols) */}
-          <div className="lg:col-span-7 grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="lg:col-span-7 xl:col-span-1 grid grid-cols-1 sm:grid-cols-2 gap-4">
             {/* PRESS MACHINE 1 */}
             <div className="bg-white rounded-3xl p-5 shadow-sm border border-emerald-100 flex flex-col justify-between">
               <div>
@@ -1206,36 +1235,12 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
           </div>
         </div>
 
-        {/* METRICS ROW */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 text-center">
-          <div className="bg-white p-3.5 rounded-2xl border border-stone-200">
-            <span className="text-[10px] font-bold text-stone-400 uppercase">전체 접수</span>
-            <p className="text-xl font-black text-stone-800 mt-0.5">{stats?.totalRegistered || 0}</p>
-          </div>
-          <div className="bg-white p-3.5 rounded-2xl border border-purple-200 bg-purple-50/30">
-            <span className="text-[10px] font-bold text-purple-600 uppercase">현재 대기</span>
-            <p className="text-xl font-black text-purple-700 mt-0.5">{stats?.totalWaiting || 0}</p>
-          </div>
-          <div className="bg-white p-3.5 rounded-2xl border border-rose-200 bg-rose-50/30">
-            <span className="text-[10px] font-bold text-rose-600 uppercase">접수대 호출</span>
-            <p className="text-xl font-black text-rose-600 mt-0.5">{stats?.totalCalling || 0}</p>
-          </div>
-          <div className="bg-white p-3.5 rounded-2xl border border-emerald-200 bg-emerald-50/30">
-            <span className="text-[10px] font-bold text-emerald-600 uppercase">완료 인원</span>
-            <p className="text-xl font-black text-emerald-700 mt-0.5">{stats?.totalCompleted || 0}</p>
-          </div>
-          <div className="bg-white p-3.5 rounded-2xl border border-stone-200">
-            <span className="text-[10px] font-bold text-stone-500 uppercase">재대기/부재</span>
-            <p className="text-xl font-black text-stone-700 mt-0.5">
-              {(stats?.totalReWaiting || 0) + (stats?.totalAbsent || 0)}
-            </p>
-          </div>
         </div>
 
         {/* STUDENT QUEUE TABLE */}
-        <div className="bg-white rounded-3xl shadow-sm border border-stone-200/80 overflow-hidden">
-          <div className="p-4 border-b border-stone-100 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-            <div className="flex bg-[#f5f3ef] p-1 rounded-2xl text-xs font-bold shrink-0">
+        <div className="xl:col-span-7 bg-white rounded-3xl shadow-sm border border-stone-200/80 overflow-hidden flex flex-col xl:sticky xl:top-24 xl:max-h-[calc(100dvh-8rem)]">
+          <div className="p-4 border-b border-stone-100 flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
+            <div className="flex bg-[#f5f3ef] p-1 rounded-2xl text-xs font-bold shrink-0 overflow-x-auto whitespace-nowrap">
               <button
                 onClick={() => setActiveTab('WAITING')}
                 className={`px-3 py-1.5 rounded-xl transition ${
@@ -1282,18 +1287,18 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
             </div>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-[#faf8f5] text-stone-500 uppercase font-semibold border-b border-stone-200">
+          <div className="overflow-auto flex-1 min-h-0">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-[#faf8f5] text-stone-500 text-xs font-semibold border-b border-stone-200 sticky top-0 z-10">
                 <tr>
-                  <th className="py-3 px-4">번호</th>
-                  <th className="py-3 px-4">이름</th>
-                  <th className="py-3 px-4">학교명</th>
-                  <th className="py-3 px-4">진행 상태</th>
-                  <th className="py-3 px-4">배정 기계</th>
-                  <th className="py-3 px-4">알림</th>
-                  <th className="py-3 px-4">접수시각</th>
-                  <th className="py-3 px-4 text-right">단계별 조작</th>
+                  <th className="py-3 px-4 whitespace-nowrap">번호</th>
+                  <th className="py-3 px-4 whitespace-nowrap">이름</th>
+                  <th className="py-3 px-4 whitespace-nowrap hidden md:table-cell">학교명</th>
+                  <th className="py-3 px-4 whitespace-nowrap">진행 상태</th>
+                  <th className="py-3 px-4 whitespace-nowrap hidden 2xl:table-cell">배정 기계</th>
+                  <th className="py-3 px-4 whitespace-nowrap hidden 2xl:table-cell">알림</th>
+                  <th className="py-3 px-4 whitespace-nowrap hidden lg:table-cell">접수시각</th>
+                  <th className="py-3 px-4 text-right whitespace-nowrap">단계별 조작</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-stone-100">
@@ -1313,11 +1318,14 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
                           : ''
                       }`}
                     >
-                      <td className="py-3 px-4 font-mono font-black text-stone-900">
+                      <td className="py-3 px-4 font-mono font-black text-stone-900 whitespace-nowrap">
                         {item.ticketNumber}
                       </td>
-                      <td className="py-3 px-4 font-bold text-stone-900">{item.name}</td>
-                      <td className="py-3 px-4 text-stone-600">{item.school}</td>
+                      <td className="py-3 px-4 font-bold text-stone-900">
+                        {item.name}
+                        <span className="block md:hidden text-xs font-normal text-stone-500">{item.school}</span>
+                      </td>
+                      <td className="py-3 px-4 text-stone-600 hidden md:table-cell">{item.school}</td>
                       <td className="py-3 px-4">
                         <span
                           className={`inline-block px-2.5 py-0.5 rounded-lg font-bold text-[11px] ${
@@ -1359,7 +1367,7 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
                             : '취소'}
                         </span>
                       </td>
-                      <td className="py-3 px-4 font-bold">
+                      <td className="py-3 px-4 font-bold hidden 2xl:table-cell">
                         {item.assignedSlot ? (
                           <span
                             className={
@@ -1372,7 +1380,7 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
                           <span className="text-stone-300">-</span>
                         )}
                       </td>
-                      <td className="py-3 px-4">
+                      <td className="py-3 px-4 hidden 2xl:table-cell">
                         {item.hasPush ? (
                           <span className="inline-flex items-center gap-1 text-[11px] text-emerald-600 font-semibold">
                             <Bell className="w-3 h-3" /> 연동됨
@@ -1381,14 +1389,14 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
                           <span className="text-stone-300">-</span>
                         )}
                       </td>
-                      <td className="py-3 px-4 text-stone-500 text-[11px]">
+                      <td className="py-3 px-4 text-stone-500 text-xs whitespace-nowrap hidden lg:table-cell">
                         {new Date(item.registeredAt).toLocaleTimeString('ko-KR', {
                           hour: '2-digit',
                           minute: '2-digit',
                         })}
                       </td>
                       <td className="py-3 px-4 text-right">
-                        <div className="flex items-center justify-end gap-1.5">
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
                           {(item.status === 'WAITING' || item.status === 'RE_WAITING') && (
                             <button
                               onClick={() => handleAction(item.id, 'CALL')}
@@ -1475,6 +1483,7 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
             </table>
           </div>
         </div>
+        </div>
 
         {/* BOTTOM UTILITY TOOLBAR */}
         <div className="flex flex-wrap items-center justify-between gap-4 p-4 bg-white rounded-3xl border border-stone-200/80">
@@ -1513,7 +1522,7 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
       {/* GOOGLE SHEETS AS PRIMARY DATABASE MODAL */}
       {showGoogleSheetModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-          <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl">
+          <div className="w-full max-w-lg rounded-3xl bg-white p-5 sm:p-6 shadow-2xl max-h-[90dvh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-stone-100">
               <div className="flex items-center gap-2">
                 <div className="w-8 h-8 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold">

@@ -3,14 +3,19 @@ import { StudentRegister } from './components/StudentRegister';
 import { StudentTicket } from './components/StudentTicket';
 import { PublicDisplay } from './components/PublicDisplay';
 import { AdminDashboard } from './components/AdminDashboard';
-import { PWAInstallButton } from './components/PWAInstallButton';
 import { registerServiceWorker } from './utils/pushManager';
 import type { PublicBoardDTO } from './types';
-import { LayoutDashboard, MonitorPlay, Ticket, ShieldCheck, WifiOff } from 'lucide-react';
+import { LayoutDashboard, MonitorPlay, Ticket, WifiOff } from 'lucide-react';
 
 import { safeFetchJson } from './utils/api';
 
 export type AppView = 'REGISTER' | 'TICKET' | 'DISPLAY' | 'ADMIN';
+
+const NAV_ITEMS = [
+  { key: 'STUDENT', label: '학생 화면', Icon: Ticket },
+  { key: 'DISPLAY', label: '부스 전광판', Icon: MonitorPlay },
+  { key: 'ADMIN', label: '관리자', Icon: LayoutDashboard },
+] as const;
 
 export default function App() {
   const [view, setView] = useState<AppView>('REGISTER');
@@ -147,53 +152,36 @@ export default function App() {
         />
       )}
 
-      {/* Fixed Navigation Bottom Bar for Easy Switching between Student / Screen / Admin */}
+      {/* Screen switcher: full-width tab bar on phones, floating pill on larger screens */}
       <nav
         aria-label="화면 전환 바"
-        className="fixed bottom-3 left-1/2 -translate-x-1/2 z-40 bg-slate-900/90 backdrop-blur-md text-white px-2 py-1.5 rounded-2xl shadow-2xl border border-slate-700/60 flex items-center gap-1 text-xs"
+        className="fixed z-40 inset-x-0 bottom-0 bg-slate-900/95 backdrop-blur-md text-white border-t border-slate-700/60 pb-[env(safe-area-inset-bottom)] sm:inset-x-auto sm:left-1/2 sm:-translate-x-1/2 sm:bottom-4 sm:rounded-2xl sm:border sm:shadow-2xl sm:pb-0"
       >
-        <button
-          onClick={() => {
-            const saved = localStorage.getItem('canbadge_token');
-            if (saved) navigateTo('TICKET', saved);
-            else navigateTo('REGISTER');
-          }}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold transition ${
-            view === 'REGISTER' || view === 'TICKET'
-              ? 'bg-blue-600 text-white shadow-xs'
-              : 'text-slate-300 hover:text-white hover:bg-slate-800'
-          }`}
-        >
-          <Ticket className="w-3.5 h-3.5" />
-          <span>학생 화면</span>
-        </button>
-
-        <button
-          onClick={() => navigateTo('DISPLAY')}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold transition ${
-            view === 'DISPLAY'
-              ? 'bg-blue-600 text-white shadow-xs'
-              : 'text-slate-300 hover:text-white hover:bg-slate-800'
-          }`}
-        >
-          <MonitorPlay className="w-3.5 h-3.5" />
-          <span>부스 전광판</span>
-        </button>
-
-        <button
-          onClick={() => navigateTo('ADMIN')}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold transition ${
-            view === 'ADMIN'
-              ? 'bg-blue-600 text-white shadow-xs'
-              : 'text-slate-300 hover:text-white hover:bg-slate-800'
-          }`}
-        >
-          <LayoutDashboard className="w-3.5 h-3.5" />
-          <span>관리자</span>
-        </button>
-
-        <div className="ml-1 pl-1 border-l border-slate-700">
-          <PWAInstallButton />
+        <div className="grid grid-cols-3 sm:flex sm:items-center sm:gap-1 sm:p-1.5">
+          {NAV_ITEMS.map(({ key, label, Icon }) => {
+            const active = key === 'STUDENT' ? view === 'REGISTER' || view === 'TICKET' : view === key;
+            return (
+              <button
+                key={key}
+                onClick={() => {
+                  if (key === 'STUDENT') {
+                    const saved = localStorage.getItem('canbadge_token');
+                    if (saved) navigateTo('TICKET', saved);
+                    else navigateTo('REGISTER');
+                  } else {
+                    navigateTo(key);
+                  }
+                }}
+                aria-current={active ? 'page' : undefined}
+                className={`flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-1.5 py-2 sm:px-4 sm:py-2 sm:rounded-xl text-[11px] sm:text-xs font-bold transition ${
+                  active ? 'text-white sm:bg-blue-600' : 'text-slate-400 hover:text-white sm:hover:bg-slate-800'
+                }`}
+              >
+                <Icon className={`w-5 h-5 sm:w-4 sm:h-4 ${active ? 'text-blue-400 sm:text-white' : ''}`} />
+                <span className="whitespace-nowrap">{label}</span>
+              </button>
+            );
+          })}
         </div>
       </nav>
     </div>

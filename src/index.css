@@ -1,5 +1,25 @@
 @import "tailwindcss";
 
+html {
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  overflow-x: hidden;
+  word-break: keep-all;
+}
+
+/* Space reserved for the bottom screen switcher (taller on phones) */
+.pb-nav {
+  padding-bottom: calc(5rem + env(safe-area-inset-bottom));
+}
+@media (min-width: 640px) {
+  .pb-nav {
+    padding-bottom: 6rem;
+  }
+}
+
 @keyframes gentle-bounce {
   0%, 100% {
     transform: translateY(0);
