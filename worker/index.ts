@@ -14,6 +14,9 @@ import type {
 interface Env {
   ASSETS: { fetch: (req: Request) => Promise<Response> };
   BOOTH: any;
+  // Google Apps Script 웹 앱 URL (시트에 서버가 직접 기록). 없으면 서버 측 시트 기록은 꺼짐.
+  SHEET_WEBHOOK_URL?: string;
+  SHEET_WEBHOOK_SECRET?: string;
 }
 
 export default {
@@ -45,6 +48,20 @@ const defaultConfig: BoothConfig = {
 
 const SHEET_TAB = '대기자 명단';
 const SUMMARY_TAB = '실시간 부스 현황';
+const SHEET_HEADERS = ['대기 번호', '학생 이름', '학교명', '진행 상태', '배정 기계', '호출 횟수', '접수 시각', '호출 시각', '사진 편집 시작', '프레스 제작 시작', '체험 완료 시각'];
+
+const STATUS_LABELS: Record<QueueStatus, string> = {
+  WAITING: '대기 중',
+  CALLED: '호출 중',
+  PHOTO_EDITING: '사진 편집/출력',
+  ASSIGNED_PRESS_1: '1번 프레스',
+  ASSIGNED_PRESS_2: '2번 프레스',
+  COMPLETED: '완료',
+  ABSENT: '부재',
+  RE_WAITING: '재대기',
+  CANCELLED: '취소',
+};
+const statusLabel = (s: QueueStatus) => STATUS_LABELS[s] || s;
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -72,9 +89,15 @@ export class BoothState {
   private sseClients = new Set<WritableStreamDefaultWriter<Uint8Array>>();
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private encoder = new TextEncoder();
+  private env: Env;
+  private sheetTimer: ReturnType<typeof setTimeout> | null = null;
+  private sheetInFlight = false;
+  private sheetDirty = false;
+  private lastSheetWriteAt = 0;
 
-  constructor(ctx: any, _env: Env) {
+  constructor(ctx: any, env: Env) {
     this.ctx = ctx;
+    this.env = env;
     ctx.blockConcurrencyWhile(async () => {
       const stored = await ctx.storage.get(['queueItems', 'config', 'adminTokens']);
       const items = stored.get('queueItems');
@@ -104,6 +127,80 @@ export class BoothState {
     await this.save();
     const data = JSON.stringify({ type: 'UPDATE', timestamp: Date.now() });
     for (const writer of this.sseClients) this.send(writer, `data: ${data}\n\n`);
+    this.scheduleSheetWrite();
+  }
+
+  // ---------------- Server-side Google Sheet write (Apps Script webhook) ----------------
+  private get sheetWebhookEnabled() {
+    return Boolean(this.env.SHEET_WEBHOOK_URL);
+  }
+
+  // Coalesce bursts of updates into one write; never run two writes at once.
+  private scheduleSheetWrite() {
+    if (!this.sheetWebhookEnabled) return;
+    this.sheetDirty = true;
+    if (this.sheetTimer || this.sheetInFlight) return;
+    this.sheetTimer = setTimeout(() => {
+      this.sheetTimer = null;
+      this.flushSheetWrite();
+    }, 500);
+  }
+
+  private async flushSheetWrite() {
+    if (!this.sheetDirty) return;
+    this.sheetDirty = false;
+    this.sheetInFlight = true;
+    try {
+      const res = await fetch(this.env.SHEET_WEBHOOK_URL!, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ secret: this.env.SHEET_WEBHOOK_SECRET || '', ...this.buildSheetPayload() }),
+      });
+      const text = await res.text();
+      if (!res.ok || !text.includes('"ok":true')) {
+        console.warn('Sheet webhook failed:', res.status, text.slice(0, 200));
+      }
+    } catch (e: any) {
+      console.warn('Sheet webhook error:', e?.message);
+    } finally {
+      this.sheetInFlight = false;
+      this.lastSheetWriteAt = Date.now();
+      if (this.sheetDirty) this.scheduleSheetWrite();
+    }
+  }
+
+  private buildSheetPayload() {
+    const fmt = (s?: string) => (s ? new Date(s).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }) : '');
+    const items = this.queueItems;
+    // Student-typed text must not be evaluated as a sheet formula
+    const safe = (s: string) => (/^[=+\-@]/.test(s) ? `'${s}` : s);
+    const rows = items.map((i) => [
+      i.ticketNumber,
+      safe(i.name),
+      safe(i.school),
+      statusLabel(i.status),
+      i.assignedSlot ? `${i.assignedSlot}호기` : '-',
+      i.callCount,
+      fmt(i.registeredAt),
+      fmt(i.calledAt),
+      fmt(i.editingStartedAt),
+      fmt(i.pressStartedAt),
+      fmt(i.completedAt),
+    ]);
+    const desk = items.find((i) => i.status === 'PHOTO_EDITING' || i.status === 'CALLED');
+    const press1 = items.find((i) => i.status === 'ASSIGNED_PRESS_1');
+    const press2 = items.find((i) => i.status === 'ASSIGNED_PRESS_2');
+    const summary = [
+      ['부스 운영 지표', '실시간 현황 값'],
+      ['총 접수 인원', items.length],
+      ['현재 대기 인원', items.filter(isWaiting).length],
+      ['체험 완료 인원', items.filter((i) => i.status === 'COMPLETED').length],
+      ['사진 접수대 진행 번호', desk ? desk.ticketNumber : '비어 있음'],
+      ['프레스 1호기 진행 번호', press1 ? press1.ticketNumber : '비어 있음'],
+      ['프레스 2호기 진행 번호', press2 ? press2.ticketNumber : '비어 있음'],
+      ['마지막 시트 동기화 시각', new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })],
+    ];
+    return { headers: SHEET_HEADERS, rows, summary };
   }
 
   private openStream(): Response {
@@ -264,7 +361,9 @@ export class BoothState {
     const body: any = method === 'POST' ? await request.json().catch(() => ({})) : {};
 
     // Public endpoints
-    if (path === '/api/health') return json({ ok: true, timestamp: new Date().toISOString() });
+    if (path === '/api/health') {
+      return json({ ok: true, timestamp: new Date().toISOString(), sheetWebhook: this.sheetWebhookEnabled });
+    }
     if (path === '/api/queue/stream' && method === 'GET') return this.openStream();
     if (path === '/api/queue/public' && method === 'GET') return json(this.getPublicBoard());
 
@@ -535,6 +634,16 @@ export class BoothState {
     const { googleToken, spreadsheetId } = body;
     if (!googleToken || !spreadsheetId) {
       return json({ error: 'Google 인증 토큰과 시트 ID가 필요합니다.' }, 400);
+    }
+
+    // While the server is still writing the latest state to the sheet, the sheet is stale:
+    // pulling now would revert fresh app changes, so skip this round.
+    if (
+      !body.forceImport &&
+      this.sheetWebhookEnabled &&
+      (this.sheetDirty || this.sheetInFlight || this.sheetTimer || Date.now() - this.lastSheetWriteAt < 4000)
+    ) {
+      return json({ success: true, hasChanges: false, rowsUpdated: 0, data: this.getAdminData() });
     }
 
     try {

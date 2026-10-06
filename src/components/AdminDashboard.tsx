@@ -167,8 +167,8 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
         }
       };
 
+      // Let EventSource auto-reconnect instead of closing it for good
       eventSource.onerror = () => {
-        eventSource.close();
         fetchAdminData();
       };
 
