@@ -32,7 +32,7 @@ import type {
 } from '../types';
 import { QRCodeModal } from './QRCodeModal';
 import { googleSignIn, logoutGoogle, initAuth, isGoogleTokenExpired, clearGoogleTokens } from '../utils/googleAuth';
-import { createGoogleSheet, syncQueueDataToSheet, clearGoogleSheetData } from '../utils/googleSheets';
+import { createGoogleSheet, syncQueueDataToSheet } from '../utils/googleSheets';
 import type { User } from 'firebase/auth';
 import { safeFetchJson } from '../utils/api';
 
@@ -90,16 +90,27 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
     );
   }, []);
 
-  const lastSheetPushTime = useRef<number>(0);
+  // Newest server revision applied to the screen. Responses that left the server earlier
+  // (e.g. a poll that crosses a button click) are dropped instead of reverting the UI.
+  const lastRevision = useRef<number>(0);
+
+  type AdminData = { items: AdminQueueItemDTO[]; stats: AdminStatsDTO; config: BoothConfig; revision?: number };
+
+  const applyAdminData = (data: AdminData): boolean => {
+    if (typeof data.revision === 'number') {
+      if (data.revision < lastRevision.current) return false;
+      lastRevision.current = data.revision;
+    }
+    setItems(data.items);
+    setStats(data.stats);
+    setConfig(data.config);
+    return true;
+  };
 
   const fetchAdminData = async (): Promise<AdminQueueItemDTO[] | null> => {
     if (!adminToken) return null;
     try {
-      const res = await safeFetchJson<{
-        items: AdminQueueItemDTO[];
-        stats: AdminStatsDTO;
-        config: BoothConfig;
-      }>('/api/admin/queue', {
+      const res = await safeFetchJson<AdminData>('/api/admin/queue', {
         headers: { Authorization: `Bearer ${adminToken}` },
       });
       if (res.status === 401) {
@@ -108,9 +119,7 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
         return null;
       }
       if (res.ok && res.data) {
-        setItems(res.data.items);
-        setStats(res.data.stats);
-        setConfig(res.data.config);
+        if (!applyAdminData(res.data)) return null;
 
         if (res.data.config.googleSheetId && !syncedSheetId) {
           setSyncedSheetId(res.data.config.googleSheetId);
@@ -124,25 +133,24 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
     return null;
   };
 
-  // Helper to instantly push latest queue to Google Sheet
-  const pushToGoogleSheet = async (currentItems?: AdminQueueItemDTO[]) => {
-    const token = googleAccessToken || localStorage.getItem('canbadge_google_access_token');
+  // The server is the only writer of the Google Sheet (writing from several browsers at once
+  // made stale snapshots overwrite newer ones). This just asks it to write now.
+  const pushToGoogleSheet = async (_currentItems?: AdminQueueItemDTO[], tokenOverride?: string) => {
+    const token = tokenOverride || googleAccessToken || localStorage.getItem('canbadge_google_access_token');
     const sheetId = syncedSheetId || localStorage.getItem('canbadge_sheet_id');
-    const targetItems = currentItems || items;
-    if (!token || !sheetId || !targetItems) return;
+    if (!adminToken || !sheetId) return;
 
-    lastSheetPushTime.current = Date.now();
     try {
-      await syncQueueDataToSheet(token, sheetId, targetItems);
-      setSheetMessage(`⚡ 구글 시트에 실시간 반영 완료 (${new Date().toLocaleTimeString('ko-KR')})`);
-    } catch (e: any) {
-      if (e.message?.includes('invalid authentication credentials') || e.message?.includes('401')) {
-        clearGoogleTokens();
-        setGoogleAccessToken(null);
-        setSheetMessage('⚠️ 구글 로그인 토큰이 만료되었습니다. 상단 [Google 계정 다시 로그인] 버튼을 눌러주세요.');
-      } else {
-        console.warn('Auto sheet push error:', e);
+      const res = await fetch('/api/admin/sheet-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+        body: JSON.stringify({ googleToken: token || undefined, spreadsheetId: sheetId }),
+      });
+      if (res.ok) {
+        setSheetMessage(`⚡ 구글 시트에 실시간 반영 중 (${new Date().toLocaleTimeString('ko-KR')})`);
       }
+    } catch (e) {
+      console.warn('Sheet sync request error:', e);
     }
   };
 
@@ -155,13 +163,8 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
       eventSource.onmessage = async (event) => {
         try {
           const payload = JSON.parse(event.data);
-          if (payload.type === 'UPDATE') {
-            const freshItems = await fetchAdminData();
-            // Instantly push to Google Sheet when update occurs!
-            if (freshItems) {
-              await pushToGoogleSheet(freshItems);
-            }
-          }
+          // The server writes the sheet itself on every change; just refresh the screen.
+          if (payload.type === 'UPDATE') await fetchAdminData();
         } catch (e) {
           console.error(e);
         }
@@ -172,26 +175,15 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
         fetchAdminData();
       };
 
-      // Polling fallback: if SSE dropped, still push to Google Sheet whenever the queue changed
-      let lastPolledSignature = '';
-      const adminInterval = setInterval(async () => {
-        const freshItems = await fetchAdminData();
-        if (!freshItems) return;
-        const signature = JSON.stringify(freshItems.map((i) => [i.id, i.status, i.callCount, i.assignedSlot, i.name, i.school]));
-        if (lastPolledSignature && signature !== lastPolledSignature) {
-          await pushToGoogleSheet(freshItems);
-        }
-        lastPolledSignature = signature;
-      }, 3000);
+      // Polling fallback in case SSE dropped
+      const adminInterval = setInterval(fetchAdminData, 3000);
 
-      // Bidirectional Sync: Periodically check if Google Sheet was edited (every 3.5s)
+      // Bidirectional Sync: check whether someone edited the Google Sheet by hand (every 3.5s).
+      // The server only applies cells that differ from what it last wrote, so this can't revert clicks.
       const sheetPullInterval = setInterval(async () => {
         const token = googleAccessToken || localStorage.getItem('canbadge_google_access_token');
         const sheetId = syncedSheetId || localStorage.getItem('canbadge_sheet_id');
         if (!token || !sheetId || !adminToken) return;
-
-        // Skip pulling if we just wrote to Google Sheet in the last 3 seconds
-        if (Date.now() - lastSheetPushTime.current < 3000) return;
 
         try {
           const res = await fetch('/api/sheets/pull', {
@@ -208,9 +200,7 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
           if (res.ok) {
             const pullData = await res.json();
             if (pullData?.data) {
-              setItems(pullData.data.items);
-              setStats(pullData.data.stats);
-              setConfig(pullData.data.config);
+              applyAdminData(pullData.data);
               if (pullData.hasChanges) {
                 setSheetMessage(`⚡ 구글 시트의 수정 사항이 웹앱에 실시간 반영되었습니다 (${new Date().toLocaleTimeString('ko-KR')})`);
               }
@@ -291,69 +281,40 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
     setAdminToken(null);
   };
 
-  const handleAction = async (id: string, action: string, slotNumber?: number) => {
-    if (!adminToken) return;
+  // Requests currently in flight, keyed per button. A second tap on the same button before the
+  // first finishes is ignored, so a double-tap can't call two students or apply an action twice.
+  const inFlight = useRef<Set<string>>(new Set());
+
+  const runAdminAction = async (key: string, url: string, body: unknown) => {
+    if (!adminToken || inFlight.current.has(key)) return;
+    inFlight.current.add(key);
     setActionLoading(true);
     try {
-      const res = await fetch('/api/admin/action', {
+      const res = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${adminToken}`,
         },
-        body: JSON.stringify({ id, action, slotNumber }),
+        body: JSON.stringify(body),
       });
       if (res.ok) {
         const resData = await res.json();
-        const freshItems = resData?.data?.items;
-        if (freshItems) {
-          setItems(freshItems);
-          setStats(resData.data.stats);
-          setConfig(resData.data.config);
-          await pushToGoogleSheet(freshItems);
-        } else {
-          const fresh = await fetchAdminData();
-          if (fresh) await pushToGoogleSheet(fresh);
-        }
+        if (resData?.data?.items) applyAdminData(resData.data);
+        else await fetchAdminData();
       }
     } catch (err) {
       console.error(err);
     } finally {
-      setActionLoading(false);
+      inFlight.current.delete(key);
+      setActionLoading(inFlight.current.size > 0);
     }
   };
 
-  const handleCallNextToDesk = async () => {
-    if (!adminToken) return;
-    setActionLoading(true);
-    try {
-      const res = await fetch('/api/admin/call-next', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`,
-        },
-        body: JSON.stringify({ count: 1 }),
-      });
-      if (res.ok) {
-        const resData = await res.json();
-        const freshItems = resData?.data?.items;
-        if (freshItems) {
-          setItems(freshItems);
-          setStats(resData.data.stats);
-          setConfig(resData.data.config);
-          await pushToGoogleSheet(freshItems);
-        } else {
-          const fresh = await fetchAdminData();
-          if (fresh) await pushToGoogleSheet(fresh);
-        }
-      }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setActionLoading(false);
-    }
-  };
+  const handleAction = (id: string, action: string, slotNumber?: number) =>
+    runAdminAction(`action:${id}`, '/api/admin/action', { id, action, slotNumber });
+
+  const handleCallNextToDesk = () => runAdminAction('call-next', '/api/admin/call-next', { count: 1 });
 
   const handleStatusChange = async (status: 'OPEN' | 'PAUSED' | 'CLOSED') => {
     if (!adminToken) return;
@@ -464,8 +425,8 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
         setGoogleAccessToken(authRes.accessToken);
       }
 
-      await syncQueueDataToSheet(token, syncedSheetId, items);
-      setSheetMessage('🎉 성공! 최신 대기 명단이 구글 시트에 업데이트되었습니다.');
+      await pushToGoogleSheet(items, token);
+      setSheetMessage('🎉 성공! 최신 대기 명단을 구글 시트에 반영하고 있습니다.');
     } catch (err: any) {
       console.error(err);
       if (err.message?.includes('credentials') || err.message?.includes('OAuth') || err.message?.includes('만료')) {
@@ -607,13 +568,7 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
         }),
       });
 
-      // 3. Clear Google Sheet in background if token exists
-      const sheetId = syncedSheetId || config?.googleSheetId;
-      if (validGToken && sheetId) {
-        clearGoogleSheetData(validGToken, sheetId).catch(() => {});
-      }
-
-      // 4. Refetch admin data
+      // 3. Refetch admin data (the server clears and rewrites the sheet itself)
       await fetchAdminData();
       setShowResetModal(false);
       setResetSuccessToast('✅ 전체 데이터가 1번으로 성공적으로 초기화되었습니다!');
@@ -886,9 +841,7 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
                         setGoogleUser(authRes.user);
                         setGoogleAccessToken(authRes.accessToken);
                         setSheetMessage('✅ Google 계정 재로그인 성공! 시트 동기화가 활성화되었습니다.');
-                        if (items.length > 0) {
-                          await syncQueueDataToSheet(authRes.accessToken, syncedSheetId!, items);
-                        }
+                        await pushToGoogleSheet(items, authRes.accessToken);
                       }
                     } catch (e: any) {
                       alert('Google 로그인 실패: ' + e.message);

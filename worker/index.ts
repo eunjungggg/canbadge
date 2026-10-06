@@ -94,6 +94,12 @@ export class BoothState {
   private sheetInFlight = false;
   private sheetDirty = false;
   private lastSheetWriteAt = 0;
+  // Monotonic state version; clients drop responses older than the newest they've seen.
+  // Seeded from the clock so it keeps increasing across Durable Object restarts.
+  private revision = Date.now();
+  // What the server last wrote to the sheet, per ticket: [name, school, status, slot, callCount].
+  // A pulled cell that differs from this was edited by a person in the sheet.
+  private sheetBaseline = new Map<string, string[]>();
 
   constructor(ctx: any, env: Env) {
     this.ctx = ctx;
@@ -124,6 +130,7 @@ export class BoothState {
   }
 
   private async broadcastUpdate() {
+    this.revision = Math.max(Date.now(), this.revision + 1);
     await this.save();
     const data = JSON.stringify({ type: 'UPDATE', timestamp: Date.now() });
     for (const writer of this.sseClients) this.send(writer, `data: ${data}\n\n`);
@@ -246,14 +253,29 @@ export class BoothState {
     );
   }
 
-  // ---------------- Server-side Google Sheet write (Apps Script webhook) ----------------
+  // ---------------- Server-side Google Sheet write ----------------
+  // The server is the only writer of the sheet: via the Apps Script webhook if configured,
+  // otherwise with the admin's Google OAuth token (forwarded on every sheet pull).
+  private googleToken: { token: string; sheetId: string; at: number } | null = null;
+  private sheetWriteGen = 0;
+
   private get sheetWebhookEnabled() {
     return Boolean(this.env.SHEET_WEBHOOK_URL);
   }
 
+  private get canWriteSheet() {
+    return this.sheetWebhookEnabled || Boolean(this.googleToken && Date.now() - this.googleToken.at < 55 * 60 * 1000);
+  }
+
+  private rememberGoogleToken(token?: string, sheetId?: string) {
+    if (!token || !sheetId) return;
+    const isNew = !this.googleToken || this.googleToken.token !== token || this.googleToken.sheetId !== sheetId;
+    this.googleToken = { token, sheetId, at: isNew ? Date.now() : this.googleToken!.at };
+  }
+
   // Coalesce bursts of updates into one write; never run two writes at once.
   private scheduleSheetWrite() {
-    if (!this.sheetWebhookEnabled) return;
+    if (!this.canWriteSheet) return;
     this.sheetDirty = true;
     if (this.sheetTimer || this.sheetInFlight) return;
     this.sheetTimer = setTimeout(() => {
@@ -267,22 +289,71 @@ export class BoothState {
     this.sheetDirty = false;
     this.sheetInFlight = true;
     try {
-      const res = await fetch(this.env.SHEET_WEBHOOK_URL!, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ secret: this.env.SHEET_WEBHOOK_SECRET || '', ...this.buildSheetPayload() }),
-      });
-      const text = await res.text();
-      if (!res.ok || !text.includes('"ok":true')) {
-        console.warn('Sheet webhook failed:', res.status, text.slice(0, 200));
+      const payload = this.buildSheetPayload();
+      const ok = this.sheetWebhookEnabled
+        ? await this.writeSheetViaWebhook(payload)
+        : await this.writeSheetViaGoogleApi(payload);
+      if (ok) {
+        this.sheetBaseline = new Map(
+          payload.rows.map((r) => [
+            String(r[0]),
+            [String(r[1]).replace(/^'/, ''), String(r[2]).replace(/^'/, ''), String(r[3]), String(r[4]), String(r[5])],
+          ])
+        );
       }
     } catch (e: any) {
-      console.warn('Sheet webhook error:', e?.message);
+      console.warn('Sheet write error:', e?.message);
     } finally {
       this.sheetInFlight = false;
+      this.sheetWriteGen += 1;
       this.lastSheetWriteAt = Date.now();
       if (this.sheetDirty) this.scheduleSheetWrite();
     }
+  }
+
+  private async writeSheetViaWebhook(payload: ReturnType<BoothState['buildSheetPayload']>): Promise<boolean> {
+    const res = await fetch(this.env.SHEET_WEBHOOK_URL!, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ secret: this.env.SHEET_WEBHOOK_SECRET || '', ...payload }),
+    });
+    const text = await res.text();
+    if (!res.ok || !text.includes('"ok":true')) {
+      console.warn('Sheet webhook failed:', res.status, text.slice(0, 200));
+      return false;
+    }
+    return true;
+  }
+
+  private async writeSheetViaGoogleApi(payload: ReturnType<BoothState['buildSheetPayload']>): Promise<boolean> {
+    const g = this.googleToken;
+    if (!g) return false;
+    const headers = { Authorization: `Bearer ${g.token}`, 'Content-Type': 'application/json' };
+    const values = [payload.headers, ...payload.rows];
+    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${g.sheetId}/values:batchUpdate`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        valueInputOption: 'USER_ENTERED',
+        data: [
+          { range: `'${SHEET_TAB}'!A1:K${values.length}`, majorDimension: 'ROWS', values },
+          { range: `'${SUMMARY_TAB}'!A1:B${payload.summary.length}`, majorDimension: 'ROWS', values: payload.summary },
+        ],
+      }),
+    });
+    if (!res.ok) {
+      if (res.status === 401) this.googleToken = null;
+      console.warn('Sheet API write failed:', res.status, (await res.text()).slice(0, 200));
+      return false;
+    }
+    await res.body?.cancel();
+    // Clear rows left over from a longer previous list (e.g. after deletions)
+    const clearRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${g.sheetId}/values/${encodeURIComponent(`'${SHEET_TAB}'`)}!A${values.length + 1}:K2000:clear`,
+      { method: 'POST', headers }
+    );
+    await clearRes.body?.cancel();
+    return true;
   }
 
   private buildSheetPayload() {
@@ -454,7 +525,13 @@ export class BoothState {
       totalCancelled: count('CANCELLED'),
     };
 
-    return { items: adminItems, stats, config: this.config };
+    return {
+      items: adminItems,
+      stats,
+      config: this.config,
+      revision: this.revision,
+      serverWritesSheet: true,
+    };
   }
 
   private isAdmin(request: Request, body: any, url: URL): boolean {
@@ -479,7 +556,12 @@ export class BoothState {
 
     // Public endpoints
     if (path === '/api/health') {
-      return json({ ok: true, timestamp: new Date().toISOString(), sheetWebhook: this.sheetWebhookEnabled });
+      return json({
+        ok: true,
+        timestamp: new Date().toISOString(),
+        sheetWebhook: this.sheetWebhookEnabled,
+        sheetWriter: this.canWriteSheet ? (this.sheetWebhookEnabled ? 'apps-script' : 'google-login') : 'none',
+      });
     }
     if (path === '/api/queue/stream' && method === 'GET') return this.openStream();
     if (path === '/api/queue/public' && method === 'GET') return json(this.getPublicBoard());
@@ -560,6 +642,12 @@ export class BoothState {
       }
       if (path === '/api/admin/export' && method === 'GET') return this.exportCsv();
       if (path === '/api/sheets/pull' && method === 'POST') return this.pullSheet(body);
+      if (path === '/api/admin/sheet-sync' && method === 'POST') {
+        this.rememberGoogleToken(body.googleToken, body.spreadsheetId);
+        if (!this.canWriteSheet) return json({ error: 'Google 로그인이 필요합니다.' }, 400);
+        this.scheduleSheetWrite();
+        return json({ success: true });
+      }
     }
 
     return json({ error: `API endpoint not found: ${method} ${path}` }, 404);
@@ -708,6 +796,8 @@ export class BoothState {
 
       const token = googleToken || request.headers.get('x-google-token');
       const sheetId = this.config.googleSheetId;
+      if (token && sheetId) this.rememberGoogleToken(token, sheetId);
+      this.sheetBaseline.clear();
       if (token && sheetId) {
         const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
         const base = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}`;
@@ -771,15 +861,19 @@ export class BoothState {
       return json({ error: 'Google 인증 토큰과 시트 ID가 필요합니다.' }, 400);
     }
 
-    // While the server is still writing the latest state to the sheet, the sheet is stale:
-    // pulling now would revert fresh app changes, so skip this round.
-    if (
-      !body.forceImport &&
-      this.sheetWebhookEnabled &&
-      (this.sheetDirty || this.sheetInFlight || this.sheetTimer || Date.now() - this.lastSheetWriteAt < 4000)
-    ) {
-      return json({ success: true, hasChanges: false, rowsUpdated: 0, data: this.getAdminData() });
+    // The admin's Google token lets the server write the sheet itself when no Apps Script is set up.
+    this.rememberGoogleToken(googleToken, spreadsheetId);
+
+    const unchanged = () => json({ success: true, hasChanges: false, rowsUpdated: 0, data: this.getAdminData() });
+    // While a sheet write is pending, the sheet is stale: pulling now would revert fresh app changes.
+    const writePending = () => this.sheetDirty || this.sheetInFlight || Boolean(this.sheetTimer);
+    if (!body.forceImport && writePending()) return unchanged();
+    if (!body.forceImport && this.sheetBaseline.size === 0 && this.queueItems.length > 0) {
+      // No record of what the sheet should contain yet (e.g. after a restart): write first, compare later.
+      this.scheduleSheetWrite();
+      return unchanged();
     }
+    const writeGenAtStart = this.sheetWriteGen;
 
     try {
       const range = encodeURIComponent(`${SHEET_TAB}!A2:K1000`);
@@ -804,6 +898,9 @@ export class BoothState {
       const sheetData: any = await sheetRes.json();
       const rows: string[][] = sheetData.values || [];
 
+      // A write started or finished while we were reading: what we read may predate it.
+      if (!body.forceImport && (writePending() || this.sheetWriteGen !== writeGenAtStart)) return unchanged();
+
       if (Date.now() - this.lastResetTime < 15000 && this.queueItems.length === 0) {
         return json({ success: true, hasChanges: false, rowsUpdated: 0, data: this.getAdminData() });
       }
@@ -823,15 +920,23 @@ export class BoothState {
 
         const existing = this.queueItems.find((i) => i.ticketNumber === ticketNumber);
         if (existing) {
-          if (name && existing.name !== name) {
+          // Only cells a person changed in the sheet (differ from what the server last wrote) are applied.
+          // Without a baseline for this row we can't tell an edit from a stale value, so leave it alone.
+          const base = this.sheetBaseline.get(ticketNumber);
+          if (!base && !body.forceImport) continue;
+          const cells = [name, school, statusStr, assignedSlotStr, (row[5] || '').trim()];
+          const edited = cells.map((v, idx) => !base || v !== base[idx]);
+          this.sheetBaseline.set(ticketNumber, cells);
+
+          if (edited[0] && name && existing.name !== name) {
             existing.name = name;
             hasChanges = true;
           }
-          if (school && existing.school !== school) {
+          if (edited[1] && school && existing.school !== school) {
             existing.school = school;
             hasChanges = true;
           }
-          if (statusStr) {
+          if (edited[2] && statusStr) {
             const newStatus = parseStatus(statusStr);
             if (newStatus !== existing.status) {
               existing.status = newStatus;
@@ -853,17 +958,19 @@ export class BoothState {
               }
             }
           }
-          if (assignedSlotStr.includes('1') && existing.assignedSlot !== 1) {
-            existing.assignedSlot = 1;
-            hasChanges = true;
-          } else if (assignedSlotStr.includes('2') && existing.assignedSlot !== 2) {
-            existing.assignedSlot = 2;
-            hasChanges = true;
-          } else if ((assignedSlotStr === '-' || !assignedSlotStr) && existing.assignedSlot !== null) {
-            existing.assignedSlot = null;
-            hasChanges = true;
+          if (edited[3]) {
+            if (assignedSlotStr.includes('1') && existing.assignedSlot !== 1) {
+              existing.assignedSlot = 1;
+              hasChanges = true;
+            } else if (assignedSlotStr.includes('2') && existing.assignedSlot !== 2) {
+              existing.assignedSlot = 2;
+              hasChanges = true;
+            } else if ((assignedSlotStr === '-' || !assignedSlotStr) && existing.assignedSlot !== null) {
+              existing.assignedSlot = null;
+              hasChanges = true;
+            }
           }
-          if (callCount !== existing.callCount) {
+          if (edited[4] && callCount !== existing.callCount) {
             existing.callCount = callCount;
             hasChanges = true;
           }
