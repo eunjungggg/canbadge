@@ -34,17 +34,26 @@ export const PublicDisplay: React.FC<Props> = ({ onGoHome }) => {
   useEffect(() => {
     fetchBoard();
 
-    const eventSource = new EventSource('/api/queue/stream');
-    eventSource.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        if (payload.type === 'UPDATE') fetchBoard();
-      } catch (e) {
-        console.error(e);
-      }
-    };
+    let eventSource: EventSource | null = null;
+    try {
+      eventSource = new EventSource('/api/queue/stream');
+      eventSource.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type === 'UPDATE') fetchBoard();
+        } catch (e) {
+          console.error(e);
+        }
+      };
+      eventSource.onerror = () => {
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
+      };
+    } catch (e) {}
 
-    const poll = setInterval(fetchBoard, 5000);
+    const poll = setInterval(fetchBoard, 4000);
     const clock = setInterval(() => {
       const now = new Date();
       setCurrentTime(
@@ -53,7 +62,7 @@ export const PublicDisplay: React.FC<Props> = ({ onGoHome }) => {
     }, 1000);
 
     return () => {
-      eventSource.close();
+      if (eventSource) eventSource.close();
       clearInterval(poll);
       clearInterval(clock);
     };

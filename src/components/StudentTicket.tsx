@@ -33,21 +33,28 @@ export const StudentTicket: React.FC<Props> = ({ token, onBackToRegister }) => {
   const fetchTicket = async () => {
     try {
       const res = await safeFetchJson<StudentTicketDTO>(`/api/queue/ticket?token=${token}`);
-      if (!res.ok || !res.data) {
-        if (res.status === 404) throw new Error('대기 정보를 찾을 수 없습니다.');
-        throw new Error(res.error || '정보를 불러오지 못했습니다.');
-      }
-      const data = res.data;
-      setTicket(data);
-      setLastRefreshed(new Date());
+      if (res.ok && res.data) {
+        const data = res.data;
+        setTicket(data);
+        setLastRefreshed(new Date());
 
-      if (
-        (data.status === 'CALLED' ||
-          data.status === 'ASSIGNED_PRESS_1' ||
-          data.status === 'ASSIGNED_PRESS_2') &&
-        'vibrate' in navigator
-      ) {
-        navigator.vibrate([300, 150, 300, 150, 300]);
+        if (
+          (data.status === 'CALLED' ||
+            data.status === 'ASSIGNED_PRESS_1' ||
+            data.status === 'ASSIGNED_PRESS_2') &&
+          'vibrate' in navigator
+        ) {
+          navigator.vibrate([300, 150, 300, 150, 300]);
+        }
+      } else {
+        // Direct local storage fallback
+        const local = localStorage.getItem(`canbadge_ticket_${token}`);
+        if (local) {
+          setTicket(JSON.parse(local));
+          setLastRefreshed(new Date());
+        } else if (res.status === 404) {
+          throw new Error('대기 정보를 찾을 수 없습니다.');
+        }
       }
     } catch (err: any) {
       setError(err.message || '데이터 로드 실패');
@@ -59,20 +66,29 @@ export const StudentTicket: React.FC<Props> = ({ token, onBackToRegister }) => {
   useEffect(() => {
     fetchTicket();
 
-    const eventSource = new EventSource('/api/queue/stream');
-    eventSource.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        if (payload.type === 'UPDATE') fetchTicket();
-      } catch (e) {
-        console.error(e);
-      }
-    };
+    let eventSource: EventSource | null = null;
+    try {
+      eventSource = new EventSource('/api/queue/stream');
+      eventSource.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type === 'UPDATE') fetchTicket();
+        } catch (e) {
+          console.error(e);
+        }
+      };
+      eventSource.onerror = () => {
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
+      };
+    } catch (e) {}
 
     const interval = setInterval(fetchTicket, 6000);
 
     return () => {
-      eventSource.close();
+      if (eventSource) eventSource.close();
       clearInterval(interval);
     };
   }, [token]);

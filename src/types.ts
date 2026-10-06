@@ -48,6 +48,7 @@ export interface BoothConfig {
   ticketPrefix: string;         // 'A'
   nextTicketNumber: number;
   adminPasswordHash: string;
+  minutesPerPerson?: number;
   googleSheetId?: string;       // 연동된 구글 스프레드시트 ID
   googleSheetUrl?: string;      // 구글 스프레드시트 URL
 }

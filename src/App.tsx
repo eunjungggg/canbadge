@@ -61,17 +61,26 @@ export default function App() {
     window.addEventListener('offline', handleOffline);
 
     // SSE connection for public updates
-    const eventSource = new EventSource('/api/queue/stream');
-    eventSource.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        if (payload.type === 'UPDATE') {
-          fetchPublicData();
+    let eventSource: EventSource | null = null;
+    try {
+      eventSource = new EventSource('/api/queue/stream');
+      eventSource.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type === 'UPDATE') {
+            fetchPublicData();
+          }
+        } catch (e) {
+          console.error(e);
         }
-      } catch (e) {
-        console.error(e);
-      }
-    };
+      };
+      eventSource.onerror = () => {
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
+      };
+    } catch (e) {}
 
     const interval = setInterval(fetchPublicData, 6000);
 
@@ -79,7 +88,7 @@ export default function App() {
       window.removeEventListener('popstate', handlePopState);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
-      eventSource.close();
+      if (eventSource) eventSource.close();
       clearInterval(interval);
     };
   }, []);
