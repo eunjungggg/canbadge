@@ -21,6 +21,14 @@ function doPost(e) {
 
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const list = ss.getSheetByName(LIST_TAB) || ss.insertSheet(LIST_TAB);
+
+    // 읽기 요청: 서버가 시트에서 직접 고친 내용을 확인할 때 사용 (화면에 보이는 값 그대로 반환)
+    if (data.action === 'read') {
+      const lastRow = list.getLastRow();
+      const values = lastRow > 1 ? list.getRange(2, 1, lastRow - 1, 11).getDisplayValues() : [];
+      return reply({ ok: true, rows: values });
+    }
+
     const summary = ss.getSheetByName(SUMMARY_TAB) || ss.insertSheet(SUMMARY_TAB);
 
     // 대기자 명단: 헤더 + 전체 행을 통째로 다시 씀
@@ -42,7 +50,7 @@ function doPost(e) {
       summary.getRange(1, 1, s.length, 2).setValues(s);
     }
 
-    return reply({ ok: true, rows: rows.length });
+    return reply({ ok: true, written: rows.length });
   } catch (err) {
     return reply({ ok: false, error: String(err) });
   } finally {

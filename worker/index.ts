@@ -47,7 +47,6 @@ const defaultConfig: BoothConfig = {
 };
 
 const SHEET_TAB = '대기자 명단';
-const SUMMARY_TAB = '실시간 부스 현황';
 const SHEET_HEADERS = ['대기 번호', '학생 이름', '학교명', '진행 상태', '배정 기계', '호출 횟수', '접수 시각', '호출 시각', '사진 편집 시작', '프레스 제작 시작', '체험 완료 시각'];
 
 const STATUS_LABELS: Record<QueueStatus, string> = {
@@ -62,6 +61,9 @@ const STATUS_LABELS: Record<QueueStatus, string> = {
   CANCELLED: '취소',
 };
 const statusLabel = (s: QueueStatus) => STATUS_LABELS[s] || s;
+
+const SHEET_POLL_MS = 10_000;
+const SHEET_POLL_IDLE_MS = 30 * 60 * 1000;
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -253,29 +255,17 @@ export class BoothState {
     );
   }
 
-  // ---------------- Server-side Google Sheet write ----------------
-  // The server is the only writer of the sheet: via the Apps Script webhook if configured,
-  // otherwise with the admin's Google OAuth token (forwarded on every sheet pull).
-  private googleToken: { token: string; sheetId: string; at: number } | null = null;
+  // ---------------- Server-side Google Sheet sync (Apps Script webhook) ----------------
+  // The server is the only reader/writer of the sheet, so no browser needs a Google login.
   private sheetWriteGen = 0;
 
   private get sheetWebhookEnabled() {
     return Boolean(this.env.SHEET_WEBHOOK_URL);
   }
 
-  private get canWriteSheet() {
-    return this.sheetWebhookEnabled || Boolean(this.googleToken && Date.now() - this.googleToken.at < 55 * 60 * 1000);
-  }
-
-  private rememberGoogleToken(token?: string, sheetId?: string) {
-    if (!token || !sheetId) return;
-    const isNew = !this.googleToken || this.googleToken.token !== token || this.googleToken.sheetId !== sheetId;
-    this.googleToken = { token, sheetId, at: isNew ? Date.now() : this.googleToken!.at };
-  }
-
   // Coalesce bursts of updates into one write; never run two writes at once.
   private scheduleSheetWrite() {
-    if (!this.canWriteSheet) return;
+    if (!this.sheetWebhookEnabled) return;
     this.sheetDirty = true;
     if (this.sheetTimer || this.sheetInFlight) return;
     this.sheetTimer = setTimeout(() => {
@@ -290,10 +280,7 @@ export class BoothState {
     this.sheetInFlight = true;
     try {
       const payload = this.buildSheetPayload();
-      const ok = this.sheetWebhookEnabled
-        ? await this.writeSheetViaWebhook(payload)
-        : await this.writeSheetViaGoogleApi(payload);
-      if (ok) {
+      if (await this.writeSheetViaWebhook(payload)) {
         this.sheetBaseline = new Map(
           payload.rows.map((r) => [
             String(r[0]),
@@ -325,35 +312,46 @@ export class BoothState {
     return true;
   }
 
-  private async writeSheetViaGoogleApi(payload: ReturnType<BoothState['buildSheetPayload']>): Promise<boolean> {
-    const g = this.googleToken;
-    if (!g) return false;
-    const headers = { Authorization: `Bearer ${g.token}`, 'Content-Type': 'application/json' };
-    const values = [payload.headers, ...payload.rows];
-    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${g.sheetId}/values:batchUpdate`, {
+  private async readSheetViaWebhook(): Promise<string[][]> {
+    const res = await fetch(this.env.SHEET_WEBHOOK_URL!, {
       method: 'POST',
-      headers,
-      body: JSON.stringify({
-        valueInputOption: 'USER_ENTERED',
-        data: [
-          { range: `'${SHEET_TAB}'!A1:K${values.length}`, majorDimension: 'ROWS', values },
-          { range: `'${SUMMARY_TAB}'!A1:B${payload.summary.length}`, majorDimension: 'ROWS', values: payload.summary },
-        ],
-      }),
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ secret: this.env.SHEET_WEBHOOK_SECRET || '', action: 'read' }),
     });
-    if (!res.ok) {
-      if (res.status === 401) this.googleToken = null;
-      console.warn('Sheet API write failed:', res.status, (await res.text()).slice(0, 200));
-      return false;
+    const text = await res.text();
+    let data: any = null;
+    try {
+      data = JSON.parse(text);
+    } catch {}
+    if (!res.ok || !data?.ok || !Array.isArray(data.rows)) {
+      throw new Error(`시트 읽기 실패 (Apps Script): ${data?.error || text.slice(0, 120)}`);
     }
-    await res.body?.cancel();
-    // Clear rows left over from a longer previous list (e.g. after deletions)
-    const clearRes = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${g.sheetId}/values/${encodeURIComponent(`'${SHEET_TAB}'`)}!A${values.length + 1}:K2000:clear`,
-      { method: 'POST', headers }
-    );
-    await clearRes.body?.cancel();
-    return true;
+    return data.rows.map((r: unknown[]) => r.map((v) => String(v ?? '')));
+  }
+
+  // ---------------- Automatic sheet → app sync (no admin browser needed) ----------------
+  // With the Apps Script webhook, a Durable Object alarm checks the sheet every SHEET_POLL_MS
+  // for hand edits. It only keeps polling while the booth is in use, to stay within Apps Script quotas.
+  private lastActivityAt = Date.now();
+  private pollAlarmSet = false;
+
+  private async ensureSheetPoll() {
+    if (!this.sheetWebhookEnabled || this.pollAlarmSet) return;
+    this.pollAlarmSet = true;
+    await this.ctx.storage.setAlarm(Date.now() + SHEET_POLL_MS);
+  }
+
+  async alarm() {
+    this.pollAlarmSet = false;
+    if (!this.sheetWebhookEnabled) return;
+    const active = this.sseClients.size > 0 || Date.now() - this.lastActivityAt < SHEET_POLL_IDLE_MS;
+    if (!active) return; // the next request will restart polling
+    try {
+      await this.pullSheet({});
+    } catch (e: any) {
+      console.warn('Scheduled sheet pull failed:', e?.message);
+    }
+    await this.ensureSheetPoll();
   }
 
   private buildSheetPayload() {
@@ -531,6 +529,8 @@ export class BoothState {
       config: this.config,
       revision: this.revision,
       serverWritesSheet: true,
+      // Apps Script set up: the server both writes and reads the sheet, no Google login needed in the browser
+      serverSyncsSheet: this.sheetWebhookEnabled,
     };
   }
 
@@ -553,6 +553,8 @@ export class BoothState {
     const method = request.method;
     const body: any = method === 'POST' ? await request.json().catch(() => ({})) : {};
     this.appOrigin = url.origin;
+    this.lastActivityAt = Date.now();
+    await this.ensureSheetPoll();
 
     // Public endpoints
     if (path === '/api/health') {
@@ -560,7 +562,7 @@ export class BoothState {
         ok: true,
         timestamp: new Date().toISOString(),
         sheetWebhook: this.sheetWebhookEnabled,
-        sheetWriter: this.canWriteSheet ? (this.sheetWebhookEnabled ? 'apps-script' : 'google-login') : 'none',
+        sheetWriter: this.sheetWebhookEnabled ? 'apps-script' : 'none',
       });
     }
     if (path === '/api/queue/stream' && method === 'GET') return this.openStream();
@@ -630,7 +632,7 @@ export class BoothState {
       if (path === '/api/admin/call-next' && method === 'POST') return this.callNext();
       if (path === '/api/admin/action' && method === 'POST') return this.action(body);
       if (path === '/api/admin/config' && method === 'POST') return this.updateConfig(body);
-      if (path === '/api/admin/reset' && method === 'POST') return this.reset(body, request);
+      if (path === '/api/admin/reset' && method === 'POST') return this.reset(body);
       if (path === '/api/admin/purge-pii' && method === 'POST') {
         this.queueItems.forEach((i, idx) => {
           i.name = `익명학생_${idx + 1}`;
@@ -643,8 +645,7 @@ export class BoothState {
       if (path === '/api/admin/export' && method === 'GET') return this.exportCsv();
       if (path === '/api/sheets/pull' && method === 'POST') return this.pullSheet(body);
       if (path === '/api/admin/sheet-sync' && method === 'POST') {
-        this.rememberGoogleToken(body.googleToken, body.spreadsheetId);
-        if (!this.canWriteSheet) return json({ error: 'Google 로그인이 필요합니다.' }, 400);
+        if (!this.sheetWebhookEnabled) return json({ error: '시트 자동 동기화(Apps Script)가 설정되지 않았습니다.' }, 400);
         this.scheduleSheetWrite();
         return json({ success: true });
       }
@@ -785,45 +786,16 @@ export class BoothState {
     return json({ success: true, config });
   }
 
-  private async reset(body: any, request: Request): Promise<Response> {
-    const { clearAllData, resetCounterOnly, googleToken } = body;
+  private async reset(body: any): Promise<Response> {
+    const { clearAllData, resetCounterOnly } = body;
     if (resetCounterOnly) {
       this.config.nextTicketNumber = 1;
     } else if (clearAllData) {
       this.queueItems = [];
       this.config.nextTicketNumber = 1;
       this.lastResetTime = Date.now();
-
-      const token = googleToken || request.headers.get('x-google-token');
-      const sheetId = this.config.googleSheetId;
-      if (token && sheetId) this.rememberGoogleToken(token, sheetId);
+      // broadcastUpdate below rewrites the sheet with the now-empty list (Apps Script clears old rows)
       this.sheetBaseline.clear();
-      if (token && sheetId) {
-        const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-        const base = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}`;
-        const clearRange = encodeURIComponent(SHEET_TAB) + '!A2:K2000';
-        await fetch(`${base}/values/${clearRange}:clear`, { method: 'POST', headers }).catch(() => {});
-
-        const summaryRange = encodeURIComponent(SUMMARY_TAB) + '!A1:B8';
-        await fetch(`${base}/values/${summaryRange}?valueInputOption=USER_ENTERED`, {
-          method: 'PUT',
-          headers,
-          body: JSON.stringify({
-            range: `${SUMMARY_TAB}!A1:B8`,
-            majorDimension: 'ROWS',
-            values: [
-              ['부스 운영 지표', '실시간 현황 값'],
-              ['총 접수 인원', 0],
-              ['현재 대기 인원', 0],
-              ['체험 완료 인원', 0],
-              ['사진 접수대 진행 번호', '비어 있음'],
-              ['프레스 1호기 진행 번호', '비어 있음'],
-              ['프레스 2호기 진행 번호', '비어 있음'],
-              ['마지막 초기화 시각', new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })],
-            ],
-          }),
-        }).catch(() => {});
-      }
     }
 
     await this.broadcastUpdate();
@@ -856,13 +828,9 @@ export class BoothState {
   }
 
   private async pullSheet(body: any): Promise<Response> {
-    const { googleToken, spreadsheetId } = body;
-    if (!googleToken || !spreadsheetId) {
-      return json({ error: 'Google 인증 토큰과 시트 ID가 필요합니다.' }, 400);
+    if (!this.sheetWebhookEnabled) {
+      return json({ error: '시트 자동 동기화(Apps Script)가 설정되지 않았습니다.' }, 400);
     }
-
-    // The admin's Google token lets the server write the sheet itself when no Apps Script is set up.
-    this.rememberGoogleToken(googleToken, spreadsheetId);
 
     const unchanged = () => json({ success: true, hasChanges: false, rowsUpdated: 0, data: this.getAdminData() });
     // While a sheet write is pending, the sheet is stale: pulling now would revert fresh app changes.
@@ -876,27 +844,7 @@ export class BoothState {
     const writeGenAtStart = this.sheetWriteGen;
 
     try {
-      const range = encodeURIComponent(`${SHEET_TAB}!A2:K1000`);
-      const sheetRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}`, {
-        headers: { Authorization: `Bearer ${googleToken}` },
-      });
-
-      if (!sheetRes.ok) {
-        const err: any = await sheetRes.json().catch(() => ({}));
-        if (sheetRes.status === 401) {
-          return json(
-            {
-              code: 'GOOGLE_TOKEN_EXPIRED',
-              error: '구글 로그인 인증 토큰이 만료되었습니다. 상단 [Google 계정 다시 로그인] 버튼을 눌러주세요.',
-            },
-            401
-          );
-        }
-        throw new Error(err?.error?.message || '구글 시트 읽기 실패');
-      }
-
-      const sheetData: any = await sheetRes.json();
-      const rows: string[][] = sheetData.values || [];
+      const rows = await this.readSheetViaWebhook();
 
       // A write started or finished while we were reading: what we read may predate it.
       if (!body.forceImport && (writePending() || this.sheetWriteGen !== writeGenAtStart)) return unchanged();

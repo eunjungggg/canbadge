@@ -23,7 +23,6 @@ import {
   Check,
   X,
   RefreshCw,
-  LogIn,
 } from 'lucide-react';
 import type {
   AdminQueueItemDTO,
@@ -31,9 +30,6 @@ import type {
   BoothConfig,
 } from '../types';
 import { QRCodeModal } from './QRCodeModal';
-import { googleSignIn, logoutGoogle, initAuth, isGoogleTokenExpired, clearGoogleTokens } from '../utils/googleAuth';
-import { createGoogleSheet, syncQueueDataToSheet } from '../utils/googleSheets';
-import type { User } from 'firebase/auth';
 import { safeFetchJson } from '../utils/api';
 
 interface Props {
@@ -63,44 +59,35 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
   const [showGoogleSheetModal, setShowGoogleSheetModal] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
 
-  // Google Workspace Auth & Sheet State (Main Database)
-  const [googleUser, setGoogleUser] = useState<User | null>(null);
-  const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(null);
-  const [syncedSheetId, setSyncedSheetId] = useState<string | null>(() => {
-    return localStorage.getItem('canbadge_sheet_id');
-  });
-  const [syncedSheetUrl, setSyncedSheetUrl] = useState<string | null>(() => {
-    return localStorage.getItem('canbadge_sheet_url');
-  });
+  // Google Sheet state. The server syncs the sheet through Apps Script; the URL is only kept
+  // so the "구글 시트 열기" link knows where to go.
+  const [syncedSheetUrl, setSyncedSheetUrl] = useState<string | null>(null);
   const [sheetSyncing, setSheetSyncing] = useState(false);
   const [sheetMessage, setSheetMessage] = useState('');
   const [copiedSheet, setCopiedSheet] = useState(false);
   const [manualSheetUrl, setManualSheetUrl] = useState('');
 
-  useEffect(() => {
-    initAuth(
-      (user, token) => {
-        setGoogleUser(user);
-        setGoogleAccessToken(token);
-      },
-      () => {
-        setGoogleUser(null);
-        setGoogleAccessToken(null);
-      }
-    );
-  }, []);
-
   // Newest server revision applied to the screen. Responses that left the server earlier
   // (e.g. a poll that crosses a button click) are dropped instead of reverting the UI.
   const lastRevision = useRef<number>(0);
 
-  type AdminData = { items: AdminQueueItemDTO[]; stats: AdminStatsDTO; config: BoothConfig; revision?: number };
+  type AdminData = {
+    items: AdminQueueItemDTO[];
+    stats: AdminStatsDTO;
+    config: BoothConfig;
+    revision?: number;
+    serverSyncsSheet?: boolean;
+  };
+
+  // True when the server syncs the sheet through Apps Script: no Google login needed here.
+  const [serverSyncsSheet, setServerSyncsSheet] = useState(false);
 
   const applyAdminData = (data: AdminData): boolean => {
     if (typeof data.revision === 'number') {
       if (data.revision < lastRevision.current) return false;
       lastRevision.current = data.revision;
     }
+    if (typeof data.serverSyncsSheet === 'boolean') setServerSyncsSheet(data.serverSyncsSheet);
     setItems(data.items);
     setStats(data.stats);
     setConfig(data.config);
@@ -120,11 +107,7 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
       }
       if (res.ok && res.data) {
         if (!applyAdminData(res.data)) return null;
-
-        if (res.data.config.googleSheetId && !syncedSheetId) {
-          setSyncedSheetId(res.data.config.googleSheetId);
-          setSyncedSheetUrl(res.data.config.googleSheetUrl || null);
-        }
+        setSyncedSheetUrl(res.data.config.googleSheetUrl || null);
         return res.data.items;
       }
     } catch (err) {
@@ -133,26 +116,6 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
     return null;
   };
 
-  // The server is the only writer of the Google Sheet (writing from several browsers at once
-  // made stale snapshots overwrite newer ones). This just asks it to write now.
-  const pushToGoogleSheet = async (_currentItems?: AdminQueueItemDTO[], tokenOverride?: string) => {
-    const token = tokenOverride || googleAccessToken || localStorage.getItem('canbadge_google_access_token');
-    const sheetId = syncedSheetId || localStorage.getItem('canbadge_sheet_id');
-    if (!adminToken || !sheetId) return;
-
-    try {
-      const res = await fetch('/api/admin/sheet-sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
-        body: JSON.stringify({ googleToken: token || undefined, spreadsheetId: sheetId }),
-      });
-      if (res.ok) {
-        setSheetMessage(`⚡ 구글 시트에 실시간 반영 중 (${new Date().toLocaleTimeString('ko-KR')})`);
-      }
-    } catch (e) {
-      console.warn('Sheet sync request error:', e);
-    }
-  };
 
   useEffect(() => {
     if (adminToken) {
@@ -175,56 +138,15 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
         fetchAdminData();
       };
 
-      // Polling fallback in case SSE dropped
+      // Polling fallback in case SSE dropped. Sheet edits are picked up by the server itself.
       const adminInterval = setInterval(fetchAdminData, 3000);
-
-      // Bidirectional Sync: check whether someone edited the Google Sheet by hand (every 3.5s).
-      // The server only applies cells that differ from what it last wrote, so this can't revert clicks.
-      const sheetPullInterval = setInterval(async () => {
-        const token = googleAccessToken || localStorage.getItem('canbadge_google_access_token');
-        const sheetId = syncedSheetId || localStorage.getItem('canbadge_sheet_id');
-        if (!token || !sheetId || !adminToken) return;
-
-        try {
-          const res = await fetch('/api/sheets/pull', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${adminToken}`,
-            },
-            body: JSON.stringify({
-              googleToken: token,
-              spreadsheetId: sheetId,
-            }),
-          });
-          if (res.ok) {
-            const pullData = await res.json();
-            if (pullData?.data) {
-              applyAdminData(pullData.data);
-              if (pullData.hasChanges) {
-                setSheetMessage(`⚡ 구글 시트의 수정 사항이 웹앱에 실시간 반영되었습니다 (${new Date().toLocaleTimeString('ko-KR')})`);
-              }
-            }
-          } else if (res.status === 401) {
-            const data = await res.json().catch(() => ({}));
-            if (data?.code === 'GOOGLE_TOKEN_EXPIRED') {
-              clearGoogleTokens();
-              setGoogleAccessToken(null);
-              setSheetMessage('⚠️ 구글 로그인 세션이 만료되었습니다. 상단 [Google 계정 다시 로그인] 버튼을 눌러주세요.');
-            }
-          }
-        } catch (e) {
-          // ignore transient poll error
-        }
-      }, 3500);
 
       return () => {
         eventSource.close();
         clearInterval(adminInterval);
-        clearInterval(sheetPullInterval);
       };
     }
-  }, [adminToken, googleAccessToken, syncedSheetId]);
+  }, [adminToken]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -243,31 +165,7 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
         setAdminToken(res.data.token);
         setConfig(res.data.config);
       } else {
-        // Direct Serverless Mode Fallback (when running on Cloudflare Pages static hosting)
-        if (passwordInput.trim() === 'badge2026') {
-          const clientToken = 'cf-token-' + Date.now();
-          sessionStorage.setItem('canbadge_admin_token', clientToken);
-          setAdminToken(clientToken);
-          if (!config) {
-            setConfig({
-              boothTitle: '나만의 캔뱃지 만들기 체험 부스',
-              registrationStatus: 'OPEN',
-              noticeMessage: '부스에 오신 것을 환영합니다! 자유롭게 관람 후 순서가 되기 전에 돌아와주세요(●\'◡\'●)',
-              concurrentCapacity: 2,
-              returnNotifyCount: 5,
-              imminentNotifyCount: 2,
-              maxCallCount: 3,
-              ticketPrefix: 'A',
-              nextTicketNumber: 1,
-              adminPasswordHash: 'badge2026',
-              minutesPerPerson: 4,
-              googleSheetId: '1mj1dHs0Z6_EqIvpKx3XvyFAnYvNRsi_kBH6m9eWVU_8',
-              googleSheetUrl: 'https://docs.google.com/spreadsheets/d/1mj1dHs0Z6_EqIvpKx3XvyFAnYvNRsi_kBH6m9eWVU_8/edit',
-            });
-          }
-        } else {
-          throw new Error(res.error || '비밀번호가 올바르지 않습니다.');
-        }
+        throw new Error(res.error || '비밀번호가 올바르지 않습니다.');
       }
     } catch (err: any) {
       setLoginError(err.message || '비밀번호가 올바르지 않습니다.');
@@ -338,168 +236,38 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
     window.location.href = `/api/admin/export?auth=${adminToken}`;
   };
 
-  // Google Auth Handlers
-  const handleGoogleSignIn = async () => {
-    try {
-      const res = await googleSignIn();
-      if (res) {
-        setGoogleUser(res.user);
-        setGoogleAccessToken(res.accessToken);
-        setSheetMessage('Google 계정 인증 완료!');
-      }
-    } catch (err: any) {
-      setSheetMessage(`Google 로그인 오류: ${err.message}`);
-    }
-  };
-
-  const handleCreateAndSyncSheet = async () => {
+  // Sheet sync runs on the server (Apps Script). These buttons only trigger it right away.
+  const sheetRequest = async (url: string, body: unknown, pending: string, done: (data: any) => string) => {
+    if (!adminToken) return;
     setSheetSyncing(true);
-    setSheetMessage('구글 시트 생성 준비 중...');
-
+    setSheetMessage(pending);
     try {
-      let token = googleAccessToken;
-      if (!token) {
-        setSheetMessage('Google 로그인을 진행합니다. 팝업 창에서 계정을 선택해 주세요...');
-        const authRes = await googleSignIn();
-        if (!authRes || !authRes.accessToken) {
-          throw new Error('Google 로그인이 완료되지 않았습니다.');
-        }
-        token = authRes.accessToken;
-        setGoogleUser(authRes.user);
-        setGoogleAccessToken(authRes.accessToken);
-      }
-
-      setSheetMessage('구글 드라이브에 새 스프레드시트를 생성하고 있습니다...');
-      const sheet = await createGoogleSheet(token, '인천비즈니스고 콘텐츠디자인과 캔뱃지 부스 실시간 대기 명단');
-      
-      setSheetMessage(`스프레드시트 생성 완료! 신청자 ${items.length}명의 데이터를 동기화 중...`);
-      await syncQueueDataToSheet(token, sheet.spreadsheetId, items);
-
-      setSyncedSheetId(sheet.spreadsheetId);
-      setSyncedSheetUrl(sheet.spreadsheetUrl);
-      localStorage.setItem('canbadge_sheet_id', sheet.spreadsheetId);
-      localStorage.setItem('canbadge_sheet_url', sheet.spreadsheetUrl);
-
-      // Save to config on server
-      await fetch('/api/admin/config', {
+      const res = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`,
-        },
-        body: JSON.stringify({
-          googleSheetId: sheet.spreadsheetId,
-          googleSheetUrl: sheet.spreadsheetUrl,
-        }),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+        body: JSON.stringify(body),
       });
-
-      setSheetMessage('🎉 성공! 새 구글 스프레드시트가 메인 데이터베이스로 연동되었습니다.');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `요청 실패 (HTTP ${res.status})`);
+      if (data?.data?.items) applyAdminData(data.data);
+      setSheetMessage(done(data));
     } catch (err: any) {
-      console.error(err);
-      let msg = err.message || '알 수 없는 오류가 발생했습니다.';
-      if (err.code === 'auth/popup-blocked') {
-        msg = '브라우저 팝업이 차단되었습니다. 주소창의 팝업 차단을 해제하고 다시 시도해 주세요.';
-      } else if (err.code === 'auth/popup-closed-by-user') {
-        msg = '로그인 팝업이 닫혔습니다. 다시 시도해 주세요.';
-      }
-      setSheetMessage(`시트 생성 오류: ${msg}`);
+      setSheetMessage(`⚠️ ${err.message}`);
     } finally {
       setSheetSyncing(false);
     }
   };
 
-  const handleUpdateExistingSheet = async () => {
-    if (!syncedSheetId) return;
-    setSheetSyncing(true);
-    setSheetMessage('구글 시트에 최신 명단 반영 중...');
+  const handleUpdateExistingSheet = () =>
+    sheetRequest('/api/admin/sheet-sync', {}, '구글 시트에 최신 명단 기록 중...', () => '🎉 최신 대기 명단을 구글 시트에 기록했습니다.');
 
-    try {
-      let token = googleAccessToken;
-      if (!token || isGoogleTokenExpired()) {
-        const authRes = await googleSignIn();
-        if (!authRes || !authRes.accessToken) {
-          throw new Error('Google 계정 인증이 필요합니다.');
-        }
-        token = authRes.accessToken;
-        setGoogleUser(authRes.user);
-        setGoogleAccessToken(authRes.accessToken);
-      }
-
-      await pushToGoogleSheet(items, token);
-      setSheetMessage('🎉 성공! 최신 대기 명단을 구글 시트에 반영하고 있습니다.');
-    } catch (err: any) {
-      console.error(err);
-      if (err.message?.includes('credentials') || err.message?.includes('OAuth') || err.message?.includes('만료')) {
-        clearGoogleTokens();
-        setGoogleAccessToken(null);
-        setSheetMessage('⚠️ 구글 로그인 세션(1시간)이 만료되었습니다. 상단 [Google 계정 다시 로그인]을 눌러주세요.');
-      } else {
-        setSheetMessage(`업데이트 오류: ${err.message}`);
-      }
-    } finally {
-      setSheetSyncing(false);
-    }
-  };
-
-  const handlePullFromSheet = async () => {
-    if (!syncedSheetId || !adminToken) return;
-    let token = googleAccessToken;
-    if (!token || isGoogleTokenExpired()) {
-      try {
-        const authRes = await googleSignIn();
-        if (!authRes) return;
-        token = authRes.accessToken;
-        setGoogleUser(authRes.user);
-        setGoogleAccessToken(authRes.accessToken);
-      } catch (authErr: any) {
-        alert('Google 계정 로그인이 필요합니다: ' + authErr.message);
-        return;
-      }
-    }
-
-    setSheetSyncing(true);
-    setSheetMessage('구글 시트로부터 데이터 불러오는 중...');
-
-    try {
-      const res = await fetch('/api/sheets/pull', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`,
-        },
-        body: JSON.stringify({
-          googleToken: token,
-          spreadsheetId: syncedSheetId,
-          forceImport: true,
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        if (data.code === 'GOOGLE_TOKEN_EXPIRED' || data.error?.includes('credentials') || data.error?.includes('만료')) {
-          clearGoogleTokens();
-          setGoogleAccessToken(null);
-          setSheetMessage('⚠️ 구글 로그인 세션(1시간)이 만료되었습니다. [Google 계정 다시 로그인] 버튼을 눌러주세요.');
-          return;
-        }
-        throw new Error(data.error || '시트 불러오기 실패');
-      }
-
-      fetchAdminData();
-      setSheetMessage(`성공! 구글 시트에서 총 ${data.rowsUpdated}건의 명단을 웹앱으로 불러왔습니다.`);
-    } catch (err: any) {
-      console.error(err);
-      if (err.message?.includes('credentials') || err.message?.includes('OAuth') || err.message?.includes('만료')) {
-        clearGoogleTokens();
-        setGoogleAccessToken(null);
-        setSheetMessage('⚠️ 구글 로그인 세션이 만료되었습니다. [Google 계정 다시 로그인] 버튼을 눌러주세요.');
-      } else {
-        setSheetMessage(`불러오기 오류: ${err.message}`);
-      }
-    } finally {
-      setSheetSyncing(false);
-    }
-  };
+  const handlePullFromSheet = () =>
+    sheetRequest(
+      '/api/sheets/pull',
+      { forceImport: true },
+      '구글 시트에서 불러오는 중...',
+      (data) => `성공! 구글 시트의 ${data.rowsUpdated ?? 0}건을 확인해 앱에 반영했습니다.`
+    );
 
   const handleConnectManualSheet = async () => {
     if (!manualSheetUrl.trim()) return;
@@ -510,10 +278,7 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
       return;
     }
     const sheetUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/edit`;
-    setSyncedSheetId(sheetId);
     setSyncedSheetUrl(sheetUrl);
-    localStorage.setItem('canbadge_sheet_id', sheetId);
-    localStorage.setItem('canbadge_sheet_url', sheetUrl);
 
     if (adminToken) {
       await fetch('/api/admin/config', {
@@ -528,7 +293,8 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
         }),
       });
     }
-    setSheetMessage(`연결 완료! 구글 시트 ID(${sheetId.slice(0, 8)}...)가 연동되었습니다.`);
+    setManualSheetUrl('');
+    setSheetMessage('시트 링크를 저장했습니다. [구글 시트 열기] 버튼이 이 시트로 연결됩니다.');
   };
 
   const executeReset = async () => {
@@ -553,8 +319,6 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
 
       // 2. Call backend reset
       const token = adminToken || sessionStorage.getItem('canbadge_admin_token');
-      const gToken = googleAccessToken || localStorage.getItem('canbadge_google_access_token');
-      const validGToken = gToken && !isGoogleTokenExpired() ? gToken : undefined;
 
       await fetch('/api/admin/reset', {
         method: 'POST',
@@ -562,10 +326,7 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({
-          clearAllData: true,
-          googleToken: validGToken,
-        }),
+        body: JSON.stringify({ clearAllData: true }),
       });
 
       // 3. Refetch admin data (the server clears and rewrites the sheet itself)
@@ -804,80 +565,61 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
       {/* Main Container */}
       <main className="max-w-[1600px] mx-auto w-full px-4 lg:px-8 py-5 space-y-5">
         {/* GOOGLE SHEETS LIVE DB STATUS BANNER */}
-        {syncedSheetUrl && (
+        {config && (
           <div
             className={`p-3.5 rounded-3xl border flex flex-wrap items-center justify-between gap-3 text-xs shadow-2xs ${
-              !googleAccessToken || isGoogleTokenExpired()
-                ? 'bg-amber-50 border-amber-300 text-amber-950'
-                : 'bg-emerald-50/80 border-emerald-200/80 text-emerald-900'
+              serverSyncsSheet
+                ? 'bg-emerald-50/80 border-emerald-200/80 text-emerald-900'
+                : 'bg-stone-50 border-stone-200 text-stone-700'
             }`}
           >
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span
-                className={`w-2.5 h-2.5 rounded-full ${
-                  !googleAccessToken || isGoogleTokenExpired()
-                    ? 'bg-amber-500 animate-bounce'
-                    : 'bg-emerald-500 animate-pulse'
-                }`}
+                className={`w-2.5 h-2.5 rounded-full ${serverSyncsSheet ? 'bg-emerald-500 animate-pulse' : 'bg-stone-400'}`}
               />
               <span className="font-extrabold">
-                {!googleAccessToken || isGoogleTokenExpired()
-                  ? '⚠️ Google Sheets 연동 세션 만료 (재로그인 필요)'
-                  : 'Google Sheets 양방향 실시간 동기화 활성화'}
+                {serverSyncsSheet ? 'Google Sheets 자동 동기화 중' : 'Google Sheets 자동 동기화 꺼짐'}
               </span>
               <span className="opacity-80">
-                {!googleAccessToken || isGoogleTokenExpired()
-                  ? '보안 정책으로 1시간마다 로그인이 만료됩니다. 오른쪽 [Google 계정 다시 로그인]을 눌러주세요.'
-                  : (sheetMessage || '(앱과 구글 시트 양방향으로 완료 및 상태가 실시간 자동 연동됩니다)')}
+                {sheetMessage ||
+                  (serverSyncsSheet
+                    ? '(앱 변경은 즉시 시트에 기록되고, 시트에서 고친 내용은 10초 안에 앱에 반영됩니다)'
+                    : '(Apps Script 웹 앱 주소가 서버에 설정되면 자동으로 켜집니다)')}
               </span>
             </div>
-            <div className="flex items-center gap-2">
-              {(!googleAccessToken || isGoogleTokenExpired()) && (
-                <button
-                  onClick={async () => {
-                    try {
-                      const authRes = await googleSignIn();
-                      if (authRes) {
-                        setGoogleUser(authRes.user);
-                        setGoogleAccessToken(authRes.accessToken);
-                        setSheetMessage('✅ Google 계정 재로그인 성공! 시트 동기화가 활성화되었습니다.');
-                        await pushToGoogleSheet(items, authRes.accessToken);
-                      }
-                    } catch (e: any) {
-                      alert('Google 로그인 실패: ' + e.message);
-                    }
-                  }}
-                  className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold transition flex items-center gap-1 shadow-xs animate-pulse"
-                >
-                  <LogIn className="w-3.5 h-3.5" />
-                  Google 계정 다시 로그인
-                </button>
+            <div className="flex flex-wrap items-center gap-2">
+              {serverSyncsSheet && (
+                <>
+                  <button
+                    onClick={handleUpdateExistingSheet}
+                    disabled={sheetSyncing}
+                    className="px-2.5 py-1 bg-white text-emerald-800 border border-emerald-300 rounded-xl font-bold hover:bg-emerald-100 transition flex items-center gap-1"
+                    title="지금 바로 앱의 명단을 시트에 기록"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${sheetSyncing ? 'animate-spin' : ''}`} />
+                    시트 최신 갱신
+                  </button>
+                  <button
+                    onClick={handlePullFromSheet}
+                    disabled={sheetSyncing}
+                    className="px-2.5 py-1 bg-white text-emerald-800 border border-emerald-300 rounded-xl font-bold hover:bg-emerald-100 transition flex items-center gap-1"
+                    title="구글 시트에서 직접 수정한 내용을 지금 바로 앱에 반영"
+                  >
+                    시트에서 불러오기
+                  </button>
+                </>
               )}
-              <button
-                onClick={handleUpdateExistingSheet}
-                disabled={sheetSyncing}
-                className="px-2.5 py-1 bg-white text-emerald-800 border border-emerald-300 rounded-xl font-bold hover:bg-emerald-100 transition flex items-center gap-1"
-              >
-                <RefreshCw className={`w-3 h-3 ${sheetSyncing ? 'animate-spin' : ''}`} />
-                시트 최신 갱신
-              </button>
-              <button
-                onClick={handlePullFromSheet}
-                disabled={sheetSyncing}
-                className="px-2.5 py-1 bg-white text-emerald-800 border border-emerald-300 rounded-xl font-bold hover:bg-emerald-100 transition flex items-center gap-1"
-                title="구글 시트에서 직접 수정한 내용을 웹앱으로 반영"
-              >
-                시트에서 불러오기
-              </button>
-              <a
-                href={syncedSheetUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="px-3 py-1 bg-emerald-700 text-white rounded-xl font-bold hover:bg-emerald-800 transition flex items-center gap-1 shadow-2xs"
-              >
-                구글 시트 열기
-                <ExternalLink className="w-3 h-3" />
-              </a>
+              {syncedSheetUrl && (
+                <a
+                  href={syncedSheetUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3 py-1 bg-emerald-700 text-white rounded-xl font-bold hover:bg-emerald-800 transition flex items-center gap-1 shadow-2xs"
+                >
+                  구글 시트 열기
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              )}
             </div>
           </div>
         )}
@@ -1472,7 +1214,7 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
       {/* QR CODE MODAL */}
       <QRCodeModal isOpen={showQRModal} onClose={() => setShowQRModal(false)} />
 
-      {/* GOOGLE SHEETS AS PRIMARY DATABASE MODAL */}
+      {/* GOOGLE SHEET MODAL (sync runs on the server through Apps Script, no Google login) */}
       {showGoogleSheetModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
           <div className="w-full max-w-lg rounded-3xl bg-white p-5 sm:p-6 shadow-2xl max-h-[90dvh] overflow-y-auto">
@@ -1482,143 +1224,69 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
                   <FileSpreadsheet className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="font-extrabold text-stone-800 text-base">
-                    Google Sheets 메인 데이터베이스 관리
-                  </h3>
-                  <p className="text-[11px] text-stone-400">신청자 명단 및 실시간 대기 현황 영구 보관</p>
+                  <h3 className="font-extrabold text-stone-800 text-base">구글 시트 연동</h3>
+                  <p className="text-[11px] text-stone-400">신청자 명단과 실시간 현황을 시트에 자동 기록</p>
                 </div>
               </div>
               <button
                 onClick={() => setShowGoogleSheetModal(false)}
                 className="p-1 text-stone-400 hover:text-stone-600 rounded-full"
+                aria-label="닫기"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Google Auth Status Bar */}
-            <div className="mt-4 p-3.5 bg-[#f8faf9] rounded-2xl border border-stone-200/80 flex items-center justify-between">
-              {googleUser ? (
-                <div className="flex items-center gap-3">
-                  {googleUser.photoURL ? (
-                    <img
-                      src={googleUser.photoURL}
-                      alt="Google User"
-                      className="w-8 h-8 rounded-full border border-emerald-200"
-                    />
-                  ) : (
-                    <div className="w-8 h-8 rounded-full bg-emerald-600 text-white font-bold flex items-center justify-center text-xs">
-                      {googleUser.displayName?.[0] || 'G'}
-                    </div>
-                  )}
-                  <div>
-                    <p className="text-xs font-bold text-stone-800">
-                      {googleUser.displayName || 'Google 사용자'}
-                    </p>
-                    <p className="text-[11px] text-stone-500">{googleUser.email}</p>
-                  </div>
-                </div>
-              ) : (
-                <div className="text-xs text-stone-600">
-                  Google 계정에 로그인하여 내 드라이브에 시트 DB를 연동하세요.
-                </div>
-              )}
-
-              {googleUser ? (
-                <button
-                  onClick={async () => {
-                    await logoutGoogle();
-                    setGoogleUser(null);
-                    setGoogleAccessToken(null);
-                  }}
-                  className="px-2.5 py-1 text-xs text-stone-500 hover:text-stone-800 border border-stone-200 rounded-lg hover:bg-white"
-                >
-                  로그아웃
-                </button>
-              ) : (
-                <button
-                  onClick={handleGoogleSignIn}
-                  className="px-3.5 py-1.5 bg-white text-stone-700 border border-stone-300 font-bold text-xs rounded-xl shadow-2xs hover:bg-stone-50 flex items-center gap-1.5"
-                >
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24">
-                    <path
-                      fill="#4285F4"
-                      d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
-                    />
-                    <path
-                      fill="#34A853"
-                      d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
-                    />
-                    <path
-                      fill="#FBBC05"
-                      d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
-                    />
-                    <path
-                      fill="#EA4335"
-                      d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
-                    />
-                  </svg>
-                  Google 로그인
-                </button>
-              )}
+            {/* Sync status */}
+            <div
+              className={`mt-4 p-3.5 rounded-2xl border text-xs ${
+                serverSyncsSheet
+                  ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900'
+                  : 'bg-amber-50 border-amber-200 text-amber-900'
+              }`}
+            >
+              <p className="font-bold">
+                {serverSyncsSheet ? '🟢 자동 동기화가 켜져 있습니다' : '⚪ 자동 동기화가 아직 설정되지 않았습니다'}
+              </p>
+              <p className="mt-1 leading-relaxed opacity-90">
+                {serverSyncsSheet
+                  ? '학생 접수와 상태 변경은 즉시 시트에 기록되고, 시트에서 직접 고친 내용은 10초 안에 앱에 반영됩니다. 로그인은 필요 없습니다.'
+                  : '구글 시트에 Apps Script(apps-script/SheetWebhook.gs)를 웹 앱으로 배포하고, Cloudflare에 SHEET_WEBHOOK_URL과 SHEET_WEBHOOK_SECRET을 설정하면 자동으로 켜집니다.'}
+              </p>
             </div>
 
             {sheetMessage && (
-              <div className="mt-3 p-2.5 bg-emerald-50 rounded-xl border border-emerald-100 text-xs text-emerald-800 font-medium">
+              <div className="mt-3 p-2.5 bg-stone-50 rounded-xl border border-stone-200 text-xs text-stone-700 font-medium">
                 {sheetMessage}
               </div>
             )}
 
-            {/* Direct Google Sheets Actions */}
             <div className="mt-4 space-y-3">
-              <div className="p-4 bg-emerald-50/50 rounded-2xl border border-emerald-100 space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-emerald-900">
-                    🟢 구글 시트 양방향 데이터베이스 관리
-                  </span>
-                  <span className="text-[11px] text-stone-500">현재 {items.length}명</span>
-                </div>
-
+              {serverSyncsSheet && (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <button
-                    onClick={handleCreateAndSyncSheet}
+                    onClick={handleUpdateExistingSheet}
                     disabled={sheetSyncing}
                     className="py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl transition flex items-center justify-center gap-1.5 shadow-2xs disabled:opacity-50"
                   >
-                    {sheetSyncing ? (
-                      <>
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        처리 중...
-                      </>
-                    ) : (
-                      <>
-                        <FileSpreadsheet className="w-3.5 h-3.5" />
-                        새 구글 시트 DB 생성
-                      </>
-                    )}
+                    <RefreshCw className={`w-3.5 h-3.5 ${sheetSyncing ? 'animate-spin' : ''}`} />
+                    지금 시트에 기록
                   </button>
-
-                  {syncedSheetUrl && (
-                    <button
-                      onClick={handleUpdateExistingSheet}
-                      disabled={sheetSyncing}
-                      className="py-2.5 px-3 bg-white text-emerald-800 border border-emerald-300 hover:bg-emerald-50 font-bold text-xs rounded-xl transition flex items-center justify-center gap-1.5 disabled:opacity-50"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5 text-emerald-600" />
-                      현재 명단 시트에 저장
-                    </button>
-                  )}
+                  <button
+                    onClick={handlePullFromSheet}
+                    disabled={sheetSyncing}
+                    className="py-2.5 px-3 bg-white text-emerald-800 border border-emerald-300 hover:bg-emerald-50 font-bold text-xs rounded-xl transition flex items-center justify-center gap-1.5 disabled:opacity-50"
+                  >
+                    📥 시트 수정 내용 지금 불러오기
+                  </button>
                 </div>
+              )}
 
-                {syncedSheetUrl && (
-                  <div className="pt-2 border-t border-emerald-100 flex items-center justify-between">
-                    <button
-                      onClick={handlePullFromSheet}
-                      disabled={sheetSyncing}
-                      className="text-xs text-emerald-700 hover:text-emerald-900 font-bold underline"
-                    >
-                      📥 시트 내용 웹앱으로 다시 불러오기
-                    </button>
+              {/* Sheet link for the "open sheet" button */}
+              <div className="p-3.5 bg-stone-50 rounded-2xl border border-stone-200/80 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-stone-700">🔗 시트 바로가기 링크</span>
+                  {syncedSheetUrl && (
                     <a
                       href={syncedSheetUrl}
                       target="_blank"
@@ -1628,45 +1296,40 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
                       시트 열기
                       <ExternalLink className="w-3 h-3" />
                     </a>
-                  </div>
-                )}
-
-                <div className="pt-3 border-t border-emerald-100 space-y-1.5">
-                  <span className="text-[11px] font-bold text-stone-700">
-                    🔗 또는 기존 구글 시트 URL / ID 직접 연동:
-                  </span>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      placeholder="구글 시트 URL 링크 또는 ID를 여기에 붙여넣기"
-                      value={manualSheetUrl}
-                      onChange={(e) => setManualSheetUrl(e.target.value)}
-                      className="flex-1 px-3 py-2 text-xs bg-white border border-stone-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-400"
-                    />
-                    <button
-                      onClick={handleConnectManualSheet}
-                      className="px-3 py-2 bg-stone-800 text-white font-bold text-xs rounded-xl hover:bg-stone-900 transition shrink-0"
-                    >
-                      시트 연동
-                    </button>
-                  </div>
+                  )}
+                </div>
+                <p className="text-[11px] text-stone-500">
+                  관리자 화면의 [구글 시트 열기] 버튼이 열 시트 주소입니다. (기록 대상은 Apps Script를 설치한 시트)
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    placeholder="구글 시트 URL을 붙여넣기"
+                    value={manualSheetUrl}
+                    onChange={(e) => setManualSheetUrl(e.target.value)}
+                    className="flex-1 min-w-0 px-3 py-2 text-xs bg-white border border-stone-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-400"
+                  />
+                  <button
+                    onClick={handleConnectManualSheet}
+                    className="px-3 py-2 bg-stone-800 text-white font-bold text-xs rounded-xl hover:bg-stone-900 transition shrink-0"
+                  >
+                    저장
+                  </button>
                 </div>
               </div>
 
               {/* Offline Clipboard Copy */}
               <div className="p-3.5 bg-stone-50 rounded-2xl border border-stone-200/80 space-y-2">
-                <p className="text-xs font-bold text-stone-700">
-                  📋 구글 시트에 직접 붙여넣기 (클립보드 복사)
-                </p>
+                <p className="text-xs font-bold text-stone-700">📋 표 데이터 복사 (클립보드)</p>
                 <p className="text-[11px] text-stone-500">
-                  복사 버튼을 누른 후 아무 스프레드시트 셀에서 Ctrl+V를 누르면 표로 즉시 붙여넣어집니다.
+                  복사 후 아무 스프레드시트 셀에서 Ctrl+V를 누르면 표로 붙여넣어집니다.
                 </p>
                 <button
                   onClick={handleCopyForGoogleSheet}
                   className="w-full py-2 bg-white text-stone-800 border border-stone-300 font-bold rounded-xl text-xs hover:bg-stone-50 transition flex items-center justify-center gap-1.5"
                 >
                   {copiedSheet ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                  {copiedSheet ? '클립보드에 표 복사 완료!' : '구글 시트용 표 데이터 복사'}
+                  {copiedSheet ? '클립보드에 표 복사 완료!' : '표 데이터 복사'}
                 </button>
               </div>
             </div>
@@ -1745,8 +1408,6 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
         <SettingsModal
           config={config}
           adminToken={adminToken}
-          googleAccessToken={googleAccessToken}
-          syncedSheetId={syncedSheetId}
           onClose={() => setShowSettingsModal(false)}
           onClearAll={async () => {
             setShowSettingsModal(false);
@@ -1765,12 +1426,10 @@ export const AdminDashboard: React.FC<Props> = ({ onGoHome, onGoDisplay }) => {
 const SettingsModal: React.FC<{
   config: BoothConfig;
   adminToken: string;
-  googleAccessToken?: string | null;
-  syncedSheetId?: string | null;
   onClose: () => void;
   onClearAll?: () => Promise<void>;
   onSaved: () => void;
-}> = ({ config, adminToken, googleAccessToken, syncedSheetId, onClose, onClearAll, onSaved }) => {
+}> = ({ config, adminToken, onClose, onClearAll, onSaved }) => {
   const [title, setTitle] = useState(config.boothTitle);
   const [notice, setNotice] = useState(config.noticeMessage);
   const [prefix, setPrefix] = useState(config.ticketPrefix);
