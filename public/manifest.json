@@ -1,0 +1,26 @@
+{
+  "id": "/",
+  "name": "인비고 직업체험관 실시간 대기 관리",
+  "short_name": "인비고대기",
+  "description": "인천비즈니스고등학교 콘텐츠디자인과 캔뱃지 제작 체험 부스 실시간 대기 등록 및 순번 호출 시스템",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#faf8f5",
+  "theme_color": "#2563eb",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "192x192 512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "192x192 512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

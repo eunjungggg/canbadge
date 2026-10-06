@@ -1,0 +1,18 @@
+{
+  "queueItems": [],
+  "config": {
+    "boothTitle": "나만의 캔뱃지 만들기 체험 부스",
+    "registrationStatus": "OPEN",
+    "noticeMessage": "부스에 오신 것을 환영합니다! 자유롭게 관람 후 순서가 되기 전에 돌아와주세요(●'◡'●)",
+    "concurrentCapacity": 2,
+    "returnNotifyCount": 5,
+    "imminentNotifyCount": 2,
+    "maxCallCount": 3,
+    "ticketPrefix": "A",
+    "nextTicketNumber": 1,
+    "adminPasswordHash": "badge2026",
+    "minutesPerPerson": 4,
+    "googleSheetId": "1mj1dHs0Z6_EqIvpKx3XvyFAnYvNRsi_kBH6m9eWVU_8",
+    "googleSheetUrl": "https://docs.google.com/spreadsheets/d/1mj1dHs0Z6_EqIvpKx3XvyFAnYvNRsi_kBH6m9eWVU_8/edit"
+  }
+}

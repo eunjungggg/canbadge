@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="badgeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6" />
+      <stop offset="100%" stop-color="#1d4ed8" />
+    </linearGradient>
+    <linearGradient id="starGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24" />
+      <stop offset="100%" stop-color="#f59e0b" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#1e3a8a" flood-opacity="0.35" />
+    </filter>
+  </defs>
+  <!-- Outer metallic rim -->
+  <circle cx="256" cy="256" r="236" fill="#e2e8f0" stroke="#cbd5e1" stroke-width="8" filter="url(#shadow)" />
+  <!-- Main Badge Circle -->
+  <circle cx="256" cy="256" r="216" fill="url(#badgeGrad)" stroke="#60a5fa" stroke-width="6" />
+  <!-- Inner decorative stitch pattern -->
+  <circle cx="256" cy="256" r="190" fill="none" stroke="#93c5fd" stroke-width="4" stroke-dasharray="10 8" opacity="0.6" />
+  <!-- Center Star / Badge Graphic -->
+  <path d="M256 120 L292 208 L386 216 L314 278 L336 370 L256 320 L176 370 L198 278 L126 216 L220 208 Z" fill="url(#starGrad)" stroke="#fef08a" stroke-width="6" stroke-linejoin="round" />
+  <!-- Center Sparkle -->
+  <circle cx="256" cy="256" r="24" fill="#ffffff" opacity="0.9" />
+  <!-- Shine highlight -->
+  <path d="M120 180 A 180 180 0 0 1 340 100 A 170 170 0 0 0 140 220 Z" fill="#ffffff" opacity="0.25" />
+</svg>

@@ -1,0 +1,6 @@
+{
+  "name": "인비고 직업체험관 실시간 대기 관리",
+  "description": "직업체험관 캔뱃지 제작 체험 부스를 위한 실시간 대기 등록 및 순번 호출 관리 웹앱",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
